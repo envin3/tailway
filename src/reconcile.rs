@@ -335,6 +335,11 @@ impl Reconciler {
             "table".into(),
             exit.table.to_string(),
         ]);
+        // When the tunnel route disappears (interface down or deleted), lookups in
+        // this table must fail instead of falling through to the main table and
+        // leaving over the WAN. This also covers the gateway's own DNS queries,
+        // which the forward chain never sees.
+        commands.push(unreachable_fallback_route(exit.table));
         let mark = format!("{:#x}/{:#x}", exit.mark, MARK_MASK);
         let table = exit.table.to_string();
         let _ = self
@@ -577,6 +582,22 @@ fn moved_addresses(
         .collect()
 }
 
+fn unreachable_fallback_route(table: u32) -> Vec<String> {
+    [
+        "route",
+        "replace",
+        "unreachable",
+        "default",
+        "metric",
+        "4294967295",
+        "table",
+    ]
+    .into_iter()
+    .map(String::from)
+    .chain([table.to_string()])
+    .collect()
+}
+
 fn allocate_slot(runtime: &mut Runtime, exit_id: &str) -> Result<u32> {
     if let Some(slot) = runtime.slots.get(exit_id) {
         return Ok(*slot);
@@ -706,6 +727,14 @@ mod tests {
             "4: proton0: <POINTOPOINT,NOARP> mtu 1420 qdisc noop state DOWN"
         ));
         assert!(!link_is_up(""));
+    }
+
+    #[test]
+    fn tunnel_tables_end_in_an_unreachable_route() {
+        assert_eq!(
+            unreachable_fallback_route(10_003).join(" "),
+            "route replace unreachable default metric 4294967295 table 10003"
+        );
     }
 
     #[test]
