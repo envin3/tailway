@@ -142,7 +142,7 @@ MagicDNS keeps working: each device still answers tailnet names itself and forwa
 
 Set the kill switch and DNS server per device in the **DNS** column of **Nodes**. `DNS_KILL_SWITCH_DEFAULT` sets the default kill switch; `DNS_FORWARDER=false` disables the forwarder.
 
-The nftables table redirects TCP and UDP port 53 addressed to the gateway itself on `tailscale0` to the forwarder on port 5353, so the agent needs no extra capability; DNS forwarded to other resolvers is routed like any other traffic. Only tailnet addresses (`100.64.0.0/10`) are answered. Until the agent's first reconcile after a restart has worked out each device's route, every lookup gets `SERVFAIL`, so a Proton device's lookups never go out over the home connection while the router is starting.
+The nftables table redirects TCP and UDP port 53 addressed to the gateway itself on `tailscale0` to the forwarder on port 5353, so the agent needs no extra capability; DNS forwarded to other resolvers is routed like any other traffic. Only tailnet addresses (`100.64.0.0/10`) are answered. Until the gateway's own Tailscale is running with the tailnet's device list, and whenever it is not (for example logged out), every lookup gets `SERVFAIL`: without the device list a Proton device would look unknown and be sent to the default server over the home connection. After a restart the agent reconciles every two seconds until Tailscale is running, so DNS normally returns within seconds.
 
 If the gateway is down, Tailscale uses the second nameserver. Devices using this exit node cannot reach it, because their traffic still goes to the unavailable exit node, so they get no DNS at all; other devices keep resolving. Tailscale may occasionally use the second nameserver even while the gateway is up.
 

@@ -15,7 +15,16 @@ pub struct Provider {
 #[derive(Default, Deserialize)]
 #[serde(default, rename_all = "PascalCase")]
 struct Status {
+    backend_state: String,
     peer: Option<HashMap<String, Peer>>,
+}
+
+/// Tailnet peers plus whether the local Tailscale is connected with a device list.
+pub struct Snapshot {
+    pub devices: Vec<Device>,
+    /// `BackendState == "Running"`: logged in with a network map, so the peer list is
+    /// authoritative. Before that (starting, logged out) it may be empty or partial.
+    pub running: bool,
 }
 
 #[derive(Default, Deserialize)]
@@ -38,33 +47,42 @@ impl Provider {
     }
 
     pub async fn devices(&self) -> Result<Vec<Device>> {
-        let output = self.runner.run("tailscale", ["status", "--json"]).await?;
-        let current: Status = serde_json::from_slice(&output)
-            .map_err(|error| anyhow!("decode Tailscale status: {error}"))?;
-        let peers = current.peer.unwrap_or_default();
-        let mut devices = Vec::with_capacity(peers.len());
-        for peer in peers.into_values() {
-            if peer.id.is_empty() {
-                continue;
-            }
-            let display_name = display_name(&peer);
-            let addresses = peer
-                .tailscale_ips
-                .into_iter()
-                .filter_map(|address| address.parse::<IpAddr>().ok())
-                .filter(IpAddr::is_ipv4)
-                .collect();
-            devices.push(Device {
-                node_id: peer.id,
-                display_name,
-                addresses,
-                online: peer.online,
-                active: peer.active,
-            });
-        }
-        devices.sort_by(|left, right| left.node_id.cmp(&right.node_id));
-        Ok(devices)
+        Ok(self.snapshot().await?.devices)
     }
+
+    pub async fn snapshot(&self) -> Result<Snapshot> {
+        let output = self.runner.run("tailscale", ["status", "--json"]).await?;
+        parse(&output)
+    }
+}
+
+fn parse(output: &[u8]) -> Result<Snapshot> {
+    let current: Status = serde_json::from_slice(output)
+        .map_err(|error| anyhow!("decode Tailscale status: {error}"))?;
+    let running = current.backend_state == "Running";
+    let peers = current.peer.unwrap_or_default();
+    let mut devices = Vec::with_capacity(peers.len());
+    for peer in peers.into_values() {
+        if peer.id.is_empty() {
+            continue;
+        }
+        let display_name = display_name(&peer);
+        let addresses = peer
+            .tailscale_ips
+            .into_iter()
+            .filter_map(|address| address.parse::<IpAddr>().ok())
+            .filter(IpAddr::is_ipv4)
+            .collect();
+        devices.push(Device {
+            node_id: peer.id,
+            display_name,
+            addresses,
+            online: peer.online,
+            active: peer.active,
+        });
+    }
+    devices.sort_by(|left, right| left.node_id.cmp(&right.node_id));
+    Ok(Snapshot { devices, running })
 }
 
 fn display_name(peer: &Peer) -> String {
@@ -118,6 +136,18 @@ mod tests {
         assert!(!peer.online);
         assert!(!peer.active);
         assert_eq!(display_name(peer), "node-a");
+    }
+
+    #[test]
+    fn reports_whether_tailscale_is_running() {
+        let running = parse(br#"{"BackendState":"Running","Peer":{"k":{"ID":"node-a"}}}"#).unwrap();
+        assert!(running.running);
+        assert_eq!(running.devices.len(), 1);
+        for state in ["Starting", "NeedsLogin", "Stopped", ""] {
+            let snapshot =
+                parse(format!(r#"{{"BackendState":"{state}","Peer":null}}"#).as_bytes()).unwrap();
+            assert!(!snapshot.running, "{state} treated as running");
+        }
     }
 
     #[test]

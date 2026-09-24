@@ -82,11 +82,14 @@ async fn main() -> Result<()> {
 
     let interval = parse_interval(&environment("RECONCILE_INTERVAL", "30s"));
     let loop_reconciler = reconciler.clone();
+    let started = std::time::Instant::now();
     let reconcile_task = tokio::spawn(async move {
-        let mut ticker = tokio::time::interval(interval);
-        ticker.tick().await;
         loop {
-            ticker.tick().await;
+            // Retry quickly while Tailscale is still coming up after a restart, so
+            // routing and DNS become available within seconds, not one interval.
+            let starting = started.elapsed() < STARTUP_FAST_RETRY_WINDOW
+                && !loop_reconciler.tailscale_running().await;
+            tokio::time::sleep(if starting { STARTUP_RETRY } else { interval }).await;
             if let Err(error) = loop_reconciler.reconcile().await {
                 error!(%error, "reconciliation failed; forwarding remains closed");
             }
@@ -187,6 +190,9 @@ async fn shutdown_signal() {
         _ = terminate => {},
     }
 }
+
+const STARTUP_RETRY: Duration = Duration::from_secs(2);
+const STARTUP_FAST_RETRY_WINDOW: Duration = Duration::from_secs(120);
 
 fn dns_config() -> Result<Option<DnsConfig>> {
     if !environment("DNS_FORWARDER", "true")

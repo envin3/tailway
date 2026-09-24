@@ -62,6 +62,7 @@ struct Published {
     exits: Vec<Exit>,
     last_error: String,
     applied_revision: Option<u64>,
+    tailscale_running: bool,
 }
 
 pub struct Reconciler {
@@ -136,6 +137,11 @@ impl Reconciler {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
+    /// Whether the last reconcile saw Tailscale running with an authoritative peer list.
+    pub async fn tailscale_running(&self) -> bool {
+        self.published().tailscale_running
+    }
+
     /// Revision of the desired state that is currently enforced in the kernel.
     pub async fn applied_revision(&self) -> Option<u64> {
         self.published().applied_revision
@@ -167,9 +173,9 @@ impl Reconciler {
         {
             bail!("desired state revision {revision} is older than applied revision {applied}");
         }
-        let devices = match self.devices.devices().await {
-            Ok(devices) => devices,
-            Err(_) if self.config.dry_run => Vec::new(),
+        let (devices, tailscale_running) = match self.devices.snapshot().await {
+            Ok(snapshot) => (snapshot.devices, snapshot.running),
+            Err(_) if self.config.dry_run => (Vec::new(), true),
             Err(error) => return Err(error),
         };
         desired.exits.sort_by(|left, right| left.id.cmp(&right.id));
@@ -227,18 +233,25 @@ impl Reconciler {
         runtime.applied_routes = compiled.routes;
         runtime.applied_revision = Some(revision);
         if let Some(resolver) = &self.dns {
-            resolver.replace(dns::plan(dns::PlanInput {
-                devices: &devices,
-                assignments: &desired.assignments,
-                exits: &runtime_exits,
-                settings: &desired.dns,
-                defaults: resolver.defaults(),
-            }));
+            // Without an authoritative peer list every client would look unknown
+            // and get the default server over the WAN; fail closed instead.
+            if tailscale_running {
+                resolver.replace(dns::plan(dns::PlanInput {
+                    devices: &devices,
+                    assignments: &desired.assignments,
+                    exits: &runtime_exits,
+                    settings: &desired.dns,
+                    defaults: resolver.defaults(),
+                }));
+            } else {
+                resolver.clear();
+            }
         }
         *self.published() = Published {
             exits: runtime_exits,
             last_error: String::new(),
             applied_revision: Some(revision),
+            tailscale_running,
         };
         Ok(())
     }

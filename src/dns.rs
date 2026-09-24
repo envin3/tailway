@@ -172,6 +172,14 @@ impl Resolver {
         self.defaults
     }
 
+    /// Back to answering SERVFAIL for everyone, e.g. while Tailscale is not running.
+    pub fn clear(&self) {
+        *self
+            .plan
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+    }
+
     pub fn replace(&self, plan: HashMap<Ipv4Addr, Resolution>) {
         *self
             .plan
@@ -575,6 +583,10 @@ mod tests {
     #[test]
     fn unknown_clients_use_the_default_server() {
         let resolver = Resolver::new(DEFAULTS);
+        assert_eq!(resolver.resolve(address(99)), Resolution::NotReady);
+        resolver.replace(HashMap::new());
+        assert_ne!(resolver.resolve(address(99)), Resolution::NotReady);
+        resolver.clear();
         assert_eq!(resolver.resolve(address(99)), Resolution::NotReady);
         resolver.replace(HashMap::new());
         assert_eq!(
