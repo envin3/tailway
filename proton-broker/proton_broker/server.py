@@ -131,13 +131,13 @@ def main() -> None:
     os.umask(0o077)
     socket_path = Path(
         os.environ.get(
-            "PROTON_BROKER_SOCKET", "/run/proton-policy-router/proton.sock"
+            "PROTON_BROKER_SOCKET", "/run/tailscale-exit-policy-router/proton.sock"
         )
     )
     socket_path.parent.mkdir(mode=0o770, parents=True, exist_ok=True)
     socket_path.unlink(missing_ok=True)
     provisioner = CatalogProvisioner(
-        os.environ.get("PROTON_CATALOG_PATH", "/etc/proton-policy-router/catalog.json"),
+        os.environ.get("PROTON_CATALOG_PATH", "/etc/tailscale-exit-policy-router/catalog.json"),
         os.environ.get("PROTON_CONFIGS_PATH", "/run/secrets/proton"),
     )
     with BrokerServer(

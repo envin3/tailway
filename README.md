@@ -27,7 +27,7 @@ These are release gates, not optional enhancements. Follow [docs/spikes/README.m
 
 ## Prepare the host
 
-Copy this directory to persistent storage on a Linux Docker Compose host, then run commands from that directory. On Unraid, `/mnt/user/appdata/proton-policy-router` is a suitable location.
+Copy this directory to persistent storage on a Linux Docker Compose host, then run commands from that directory. On Unraid, `/mnt/user/appdata/tailscale-exit-policy-router` is a suitable location.
 
 ```sh
 cp .env.example .env
@@ -79,7 +79,7 @@ Approve the exit-node advertisement in the Tailscale admin console. Enrollment s
 Check that the baseline and supervised UI are active:
 
 ```sh
-docker compose exec gateway-agent nft list table inet proton_policy_router
+docker compose exec gateway-agent nft list table inet tailscale_exit_policy_router
 docker compose exec gateway-agent ip rule show
 docker compose top gateway-agent
 ```

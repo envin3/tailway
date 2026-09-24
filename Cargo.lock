@@ -660,7 +660,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "proton-policy-router"
+name = "tailscale-exit-policy-router"
 version = "0.1.0"
 dependencies = [
  "anyhow",

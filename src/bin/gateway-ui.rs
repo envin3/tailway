@@ -54,11 +54,11 @@ async fn main() -> Result<()> {
     let state = Arc::new(UiState {
         socket_path: PathBuf::from(environment(
             "CONTROL_SOCKET",
-            "/run/proton-policy-router/control.sock",
+            "/run/tailscale-exit-policy-router/control.sock",
         )),
         proton_socket_path: PathBuf::from(environment(
             "PROTON_BROKER_SOCKET",
-            "/run/proton-policy-router/proton.sock",
+            "/run/tailscale-exit-policy-router/proton.sock",
         )),
         password_hash: password_hash.trim().to_owned(),
         csrf_token,

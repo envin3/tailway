@@ -6,13 +6,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use proton_policy_router::catalog::StaticCatalog;
-use proton_policy_router::control::Api;
-use proton_policy_router::platform::Runner;
-use proton_policy_router::proton::AccountLimits;
-use proton_policy_router::reconcile::{Config, Reconciler};
-use proton_policy_router::state::Store;
-use proton_policy_router::tailscale::Provider;
+use tailscale_exit_policy_router::catalog::StaticCatalog;
+use tailscale_exit_policy_router::control::Api;
+use tailscale_exit_policy_router::platform::Runner;
+use tailscale_exit_policy_router::proton::AccountLimits;
+use tailscale_exit_policy_router::reconcile::{Config, Reconciler};
+use tailscale_exit_policy_router::state::Store;
+use tailscale_exit_policy_router::tailscale::Provider;
 use tokio::net::UnixListener;
 use tokio::process::{Child, Command};
 use tracing::{error, info};
@@ -24,10 +24,10 @@ async fn main() -> Result<()> {
     let runner = Runner::new(dry_run);
     let store = Arc::new(Store::new(environment(
         "STATE_PATH",
-        "/var/lib/proton-policy-router/desired.json",
+        "/var/lib/tailscale-exit-policy-router/desired.json",
     )));
     let catalog = Arc::new(StaticCatalog::new(
-        environment("CATALOG_PATH", "/etc/proton-policy-router/catalog.json"),
+        environment("CATALOG_PATH", "/etc/tailscale-exit-policy-router/catalog.json"),
         environment("SECRETS_DIRECTORY", "/run/secrets/proton"),
     ));
     let devices = Arc::new(Provider::new(runner.clone()));
@@ -37,7 +37,7 @@ async fn main() -> Result<()> {
             tailscale_interface: environment("TAILSCALE_INTERFACE", "tailscale0"),
             runtime_directory: PathBuf::from(environment(
                 "RUNTIME_DIRECTORY",
-                "/run/proton-policy-router",
+                "/run/tailscale-exit-policy-router",
             )),
             dry_run,
         },
@@ -75,7 +75,7 @@ async fn main() -> Result<()> {
 
     let socket_path = PathBuf::from(environment(
         "CONTROL_SOCKET",
-        "/run/proton-policy-router/control.sock",
+        "/run/tailscale-exit-policy-router/control.sock",
     ));
     if let Some(directory) = socket_path.parent() {
         let created = !directory.exists();
@@ -94,7 +94,7 @@ async fn main() -> Result<()> {
 
     let account_limits = Arc::new(AccountLimits::new(environment(
         "PROTON_BROKER_SOCKET",
-        "/run/proton-policy-router/proton.sock",
+        "/run/tailscale-exit-policy-router/proton.sock",
     )));
     let router = Api::new(store, catalog, devices, reconciler, account_limits).router();
     let mut gateway_ui = start_gateway_ui()?;

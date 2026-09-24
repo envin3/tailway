@@ -13,14 +13,14 @@ Store dated evidence under an ignored `docs/spikes/evidence/` directory. Include
    ```sh
    mkdir -p docs/spikes/evidence
    docker run --rm \
-     --network container:proton-policy-router-agent \
+     --network container:tailscale-exit-policy-router-agent \
      --cap-drop ALL \
      --cap-add NET_RAW \
      --cap-add SETUID \
      --cap-add SETGID \
      -v "$PWD/docs/spikes/evidence:/evidence" \
      --entrypoint timeout \
-     local/proton-policy-router-agent:0.1.0 \
+     local/tailscale-exit-policy-router-agent:0.1.0 \
      60 tcpdump -nn -i tailscale0 -w /evidence/source-identity.pcap
    ```
 

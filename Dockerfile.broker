@@ -19,11 +19,11 @@ COPY --chown=65533:1000 proton-broker/proton_broker /app/proton_broker
 ENV HOME=/var/lib/proton-broker \
     LOGNAME=proton-broker \
     PYTHONPATH=/app \
-    PROTON_BROKER_SOCKET=/run/proton-policy-router/proton.sock \
+    PROTON_BROKER_SOCKET=/run/tailscale-exit-policy-router/proton.sock \
     PROTON_LOADER_OVERRIDES=keyring=json \
     USER=proton-broker \
     XDG_CACHE_HOME=/var/lib/proton-broker/cache \
     XDG_CONFIG_HOME=/var/lib/proton-broker/config \
-    XDG_RUNTIME_DIR=/run/proton-policy-router/proton-runtime
+    XDG_RUNTIME_DIR=/run/tailscale-exit-policy-router/proton-runtime
 
 ENTRYPOINT ["python3", "-m", "proton_broker.server"]
