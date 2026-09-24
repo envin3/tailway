@@ -33,9 +33,9 @@
           <article><span>Assigned devices</span><strong id="metric-devices">0</strong></article>
           <article><span>Policy revision</span><strong id="metric-revision">0</strong></article>
         </div>
-        <div class="section-heading"><div><h2>Routing posture</h2><p>VPN failures remain blocked; disabled nodes use direct Internet.</p></div><button id="refresh">Refresh</button></div>
+        <div class="section-heading"><div><h2>Routing posture</h2><p>VPN failures remain blocked; Direct Internet is used only where it is chosen.</p></div><button id="refresh">Refresh</button></div>
         <div class="posture-grid">
-          <div><span class="posture-status good">Available</span><h3>Direct WAN</h3><p>Disabled nodes use the gateway's ordinary Internet connection.</p></div>
+          <div><span id="posture-default-status" class="posture-status good">Blocked</span><h3>Unassigned nodes</h3><p id="posture-default-text">Nodes without an assignment follow UNASSIGNED_POLICY.</p></div>
           <div><span class="posture-status good">Enforced</span><h3>IPv6 forwarding</h3><p>The first release exposes IPv4 routing only.</p></div>
           <div><span class="posture-status good">Masked</span><h3>Connection marks</h3><p>Only the router-owned mark range is changed.</p></div>
         </div>

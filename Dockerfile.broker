@@ -2,7 +2,7 @@ FROM debian:13-slim
 
 ARG PROTON_RELEASE_URL=https://repo.protonvpn.com/debian/dists/stable/main/binary-all/protonvpn-stable-release_1.0.8_all.deb
 ARG PROTON_RELEASE_SHA256=0b14e71586b22e498eb20926c48c7b434b751149b1f2af9902ef1cfe6b03e180
-ARG PROTON_CORE_VERSION=5.5.6
+ARG PROTON_CORE_VERSION=5.6.20
 
 RUN apt-get update \
     && apt-get install --no-install-recommends -y ca-certificates gnupg python3 wget \

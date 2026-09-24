@@ -7,7 +7,8 @@ services:
       dockerfile: Dockerfile.agent
       args:
         TAILSCALE_VERSION: ${TAILSCALE_VERSION:-1.102.1}
-    image: local/tailscale-exit-policy-router-agent:0.1.0
+    image: local/tailscale-exit-policy-router-agent:${IMAGE_TAG:-dev}
+    pull_policy: never
     container_name: tailscale-exit-policy-router-agent
     user: "0:${CONTROL_GID:-1000}"
     privileged: false
@@ -17,8 +18,6 @@ services:
       - NET_ADMIN
       - SETGID
       - SETUID
-      - FOWNER
-      - DAC_OVERRIDE
     devices:
       - /dev/net/tun:/dev/net/tun
     security_opt:
@@ -47,13 +46,14 @@ services:
       TAILSCALE_STATE: /var/lib/tailscale/tailscaled.state
       TLS_CERT_FILE: /run/secrets/tls/tls.crt
       TLS_KEY_FILE: /run/secrets/tls/tls.key
+      UNASSIGNED_POLICY: ${UNASSIGNED_POLICY:-block}
       WAN_INTERFACE: eth0
     volumes:
       - ./config:/etc/tailscale-exit-policy-router:ro
       - tailscale-state:/var/lib/tailscale
       - ./proton-configs:/run/secrets/proton:ro
       - ./state:/var/lib/tailscale-exit-policy-router
-      - ./run:/run/tailscale-exit-policy-router
+      - runtime:/run/tailscale-exit-policy-router
       - ./ui-auth:/run/secrets/ui:ro
       - ./tls:/run/secrets/tls:ro
     ports:
@@ -78,8 +78,9 @@ services:
       context: .
       dockerfile: Dockerfile.broker
       args:
-        PROTON_CORE_VERSION: ${PROTON_CORE_VERSION:-5.5.6}
-    image: local/tailscale-exit-policy-router-broker:0.1.0
+        PROTON_CORE_VERSION: ${PROTON_CORE_VERSION:-5.6.20}
+    image: local/tailscale-exit-policy-router-broker:${IMAGE_TAG:-dev}
+    pull_policy: never
     container_name: tailscale-exit-policy-router-broker
     user: "65533:${CONTROL_GID:-1000}"
     privileged: false
@@ -104,7 +105,7 @@ services:
     volumes:
       - ./config:/etc/tailscale-exit-policy-router
       - ./proton-configs:/run/secrets/proton
-      - ./run:/run/tailscale-exit-policy-router
+      - runtime:/run/tailscale-exit-policy-router
       - ./proton-broker-state:/var/lib/proton-broker
     networks:
       - router-net
@@ -123,3 +124,11 @@ networks:
 
 volumes:
   tailscale-state:
+  # Sockets, the compiled ruleset, and transient WireGuard key material live in
+  # memory only and are discarded when both containers stop.
+  runtime:
+    driver: local
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: "size=16m,mode=0770,uid=0,gid=${CONTROL_GID:-1000}"

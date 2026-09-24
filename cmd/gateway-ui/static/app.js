@@ -1,6 +1,9 @@
 const SERVER_PAGE_SIZE = 25;
 const COUNTRY_PAGE_SIZE = 12;
 const LOCAL_ROUTE_ID = "__local__";
+const DIRECT_ROUTE_ID = "__direct__";
+const BUILTIN_ROUTES = new Set([LOCAL_ROUTE_ID, DIRECT_ROUTE_ID]);
+const POLICY_LABELS = { block: "Blocked", local: "Local only", direct: "Direct Internet" };
 const state = { revision: 0, csrfToken: "", status: null, servers: [], protonServers: [], protonAccount: null, protonAvailable: true, exits: [], devices: [], selectedServer: null, serverPage: 1, expandedCountry: "", countryServerPage: 1 };
 const regionNames = new Intl.DisplayNames(["en"], { type: "region" });
 
@@ -53,7 +56,11 @@ const render = () => {
   document.querySelector("#health-dot").className = healthy ? "good" : "bad";
   document.querySelector("#metric-state").textContent = state.status?.state || "Unknown";
   document.querySelector("#metric-exits").textContent = state.status?.exitLimit ? `${state.exits.length} / ${state.status.exitLimit}` : state.exits.length;
-  document.querySelector("#metric-devices").textContent = state.devices.filter(device => device.exitId && device.exitId !== LOCAL_ROUTE_ID).length;
+  document.querySelector("#metric-devices").textContent = state.devices.filter(device => device.exitId && !BUILTIN_ROUTES.has(device.exitId)).length;
+  const policy = state.status?.unassignedPolicy || "block";
+  document.querySelector("#posture-default-status").textContent = POLICY_LABELS[policy] || policy;
+  document.querySelector("#posture-default-status").className = `posture-status ${policy === "direct" ? "warn" : "good"}`;
+  document.querySelector("#posture-default-text").textContent = `Nodes without an assignment are ${(POLICY_LABELS[policy] || policy).toLowerCase()} (UNASSIGNED_POLICY=${policy}).`;
   document.querySelector("#metric-revision").textContent = state.revision;
   renderAccount();
   renderServers();
@@ -143,7 +150,8 @@ const renderAccount = () => {
 const renderExits = () => {
   document.querySelector("#exit-list").innerHTML = state.exits.length ? state.exits.map(exit => `
     <article class="exit-card">
-      <header><div><p class="eyebrow">${escapeHTML(exit.country)}${exit.city ? ` · ${escapeHTML(exit.city)}` : ""}</p><h2>${escapeHTML(exit.displayName)}</h2></div><strong class="state">${escapeHTML(exit.status)}</strong></header>
+      <header><div><p class="eyebrow">${escapeHTML(exit.country)}${exit.city ? ` · ${escapeHTML(exit.city)}` : ""}</p><h2>${escapeHTML(exit.displayName)}</h2></div><strong class="state" title="${escapeHTML(exit.statusDetail || "")}">${escapeHTML(exit.status)}</strong></header>
+      ${exit.statusDetail ? `<p class="status-detail">${escapeHTML(exit.statusDetail)}</p>` : ""}
       <div class="exit-meta"><div><span>Server</span><strong>${escapeHTML(exit.serverId)}</strong></div><div><span>Public IP</span><strong>${escapeHTML(exit.publicIp || "Pending verification")}</strong></div></div>
       <button class="danger" data-delete-exit="${escapeHTML(exit.id)}">Disconnect</button>
     </article>`).join("") : `<div class="empty">No Proton exits are configured. Choose a server to create one.</div>`;
@@ -156,10 +164,16 @@ const renderDevices = () => {
   document.querySelector("#node-count").textContent = `${devices.length} of ${state.devices.length} nodes`;
   document.querySelector("#device-list").innerHTML = devices.length ? devices.map(device => {
     const selectedExit = exitsById.get(device.exitId);
+    const defaultLabel = POLICY_LABELS[state.status?.unassignedPolicy || "block"] || "Blocked";
+    if (device.missing) return `
+    <tr class="missing"><td><strong>Removed from tailnet</strong><br><small>${escapeHTML(device.nodeId)}</small></td><td>—</td><td>Missing</td><td>—</td><td>
+      <button class="secondary" data-clear-node="${escapeHTML(device.nodeId)}">Clear assignment</button>
+    </td></tr>`;
     return `
     <tr><td><strong>${escapeHTML(device.displayName || device.nodeId)}</strong><br><small>${escapeHTML(device.nodeId)}</small></td><td>${escapeHTML((device.addresses || []).join(", ") || "No IPv4 address")}</td><td>${device.online ? "Online" : "Offline"}</td><td><span class="activity ${device.active ? "observed" : ""}">${device.active ? "Observed" : device.online ? "Not observed" : "Offline"}</span></td><td>
       <select data-node="${escapeHTML(device.nodeId)}">
-        <option value="">Disabled · Direct Internet</option>
+        <option value="">Default · ${escapeHTML(defaultLabel)}</option>
+        <option value="${DIRECT_ROUTE_ID}" ${device.exitId === DIRECT_ROUTE_ID ? "selected" : ""}>Direct Internet · No VPN</option>
         <option value="${LOCAL_ROUTE_ID}" ${device.exitId === LOCAL_ROUTE_ID ? "selected" : ""}>Local only · No Internet</option>
         ${state.servers.map(server => `<option value="${escapeHTML(server.id)}" ${selectedExit?.serverId === server.id ? "selected" : ""}>${escapeHTML(server.name)} · ${escapeHTML(server.country)}${server.city ? ` · ${escapeHTML(server.city)}` : ""}</option>`).join("")}
       </select>
@@ -204,6 +218,8 @@ document.addEventListener("click", event => {
     state.countryServerPage += Number(countryPageButton.dataset.countryServerPage);
     renderServers();
   }
+  const clearButton = event.target.closest("[data-clear-node]");
+  if (clearButton) mutate(`/v1/routes/${encodeURIComponent(clearButton.dataset.clearNode)}`, "DELETE");
   const deleteButton = event.target.closest("[data-delete-exit]");
   if (deleteButton && confirm("Disconnect this exit? Assigned devices must be disabled first.")) mutate(`/v1/exits/${encodeURIComponent(deleteButton.dataset.deleteExit)}`, "DELETE");
 });

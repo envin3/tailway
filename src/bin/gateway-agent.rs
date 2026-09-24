@@ -8,6 +8,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use tailscale_exit_policy_router::catalog::StaticCatalog;
 use tailscale_exit_policy_router::control::Api;
+use tailscale_exit_policy_router::domain::UnassignedPolicy;
 use tailscale_exit_policy_router::platform::Runner;
 use tailscale_exit_policy_router::proton::AccountLimits;
 use tailscale_exit_policy_router::reconcile::{Config, Reconciler};
@@ -21,13 +22,17 @@ use tracing::{error, info};
 async fn main() -> Result<()> {
     tracing_subscriber::fmt().with_target(false).init();
     let dry_run = environment("DRY_RUN", "false").parse().unwrap_or(false);
+    let unassigned: UnassignedPolicy = environment("UNASSIGNED_POLICY", "block").parse()?;
     let runner = Runner::new(dry_run);
     let store = Arc::new(Store::new(environment(
         "STATE_PATH",
         "/var/lib/tailscale-exit-policy-router/desired.json",
     )));
     let catalog = Arc::new(StaticCatalog::new(
-        environment("CATALOG_PATH", "/etc/tailscale-exit-policy-router/catalog.json"),
+        environment(
+            "CATALOG_PATH",
+            "/etc/tailscale-exit-policy-router/catalog.json",
+        ),
         environment("SECRETS_DIRECTORY", "/run/secrets/proton"),
     ));
     let devices = Arc::new(Provider::new(runner.clone()));
@@ -40,6 +45,7 @@ async fn main() -> Result<()> {
                 "/run/tailscale-exit-policy-router",
             )),
             dry_run,
+            unassigned,
         },
         store.clone(),
         catalog.clone(),
@@ -90,7 +96,7 @@ async fn main() -> Result<()> {
     let listener = UnixListener::bind(&socket_path).context("listen on control socket")?;
     fs::set_permissions(&socket_path, fs::Permissions::from_mode(0o660))
         .context("set control socket permissions")?;
-    info!(socket = %socket_path.display(), dry_run, "gateway agent control API ready");
+    info!(socket = %socket_path.display(), dry_run, unassigned = unassigned.as_str(), "gateway agent control API ready");
 
     let account_limits = Arc::new(AccountLimits::new(environment(
         "PROTON_BROKER_SOCKET",

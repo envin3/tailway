@@ -135,6 +135,11 @@ def main() -> None:
         )
     )
     socket_path.parent.mkdir(mode=0o770, parents=True, exist_ok=True)
+    runtime_directory = os.environ.get("XDG_RUNTIME_DIR")
+    if runtime_directory:
+        # The shared runtime volume is a fresh tmpfs, so create the broker's private
+        # runtime directory on every start.
+        Path(runtime_directory).mkdir(mode=0o700, parents=True, exist_ok=True)
     socket_path.unlink(missing_ok=True)
     provisioner = CatalogProvisioner(
         os.environ.get("PROTON_CATALOG_PATH", "/etc/tailscale-exit-policy-router/catalog.json"),

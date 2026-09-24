@@ -20,7 +20,7 @@ Store dated evidence under an ignored `docs/spikes/evidence/` directory. Include
      --cap-add SETGID \
      -v "$PWD/docs/spikes/evidence:/evidence" \
      --entrypoint timeout \
-     local/tailscale-exit-policy-router-agent:0.1.0 \
+     "local/tailscale-exit-policy-router-agent:${IMAGE_TAG:-dev}" \
      60 tcpdump -nn -i tailscale0 -w /evidence/source-identity.pcap
    ```
 

@@ -1,10 +1,12 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt::Write;
 use std::net::Ipv4Addr;
 
 use anyhow::{Result, bail};
 
-use crate::domain::{Assignment, Device, Exit, ExitStatus, LOCAL_ROUTE_ID};
+use crate::domain::{
+    Assignment, DIRECT_ROUTE_ID, Device, Exit, ExitStatus, LOCAL_ROUTE_ID, UnassignedPolicy,
+};
 
 pub const MARK_MASK: u32 = 0x0000_ff00;
 
@@ -14,9 +16,44 @@ pub struct Input<'a> {
     pub exits: &'a [Exit],
     pub devices: &'a [Device],
     pub assignments: &'a [Assignment],
+    pub unassigned: UnassignedPolicy,
 }
 
-pub fn compile(input: Input<'_>) -> Result<String> {
+pub struct Compiled {
+    pub ruleset: String,
+    /// Route key applied to each forwarded source address: `block`, `local`,
+    /// `direct`, or `exit:<id>`.
+    pub routes: BTreeMap<Ipv4Addr, String>,
+    /// Assigned node IDs that are not present in the current Tailscale peer list.
+    pub unknown_nodes: Vec<String>,
+}
+
+#[derive(Clone, Copy)]
+enum Route<'a> {
+    Block,
+    Local,
+    Direct,
+    Vpn(&'a Exit),
+}
+
+impl Route<'_> {
+    fn key(self) -> String {
+        match self {
+            Route::Block => "block".into(),
+            Route::Local => "local".into(),
+            Route::Direct => "direct".into(),
+            Route::Vpn(exit) => format!("exit:{}", exit.id),
+        }
+    }
+}
+
+/// Only these exits carry traffic. A degraded exit still has a tunnel, so traffic
+/// stays inside it (and is dropped there) rather than falling back to the WAN.
+fn routable(status: &ExitStatus) -> bool {
+    matches!(status, ExitStatus::Healthy | ExitStatus::Degraded)
+}
+
+pub fn compile(input: Input<'_>) -> Result<Compiled> {
     if !valid_interface(input.wan_interface) || !valid_interface(input.tailscale_interface) {
         bail!("invalid WAN or Tailscale interface");
     }
@@ -36,7 +73,7 @@ pub fn compile(input: Input<'_>) -> Result<String> {
         if !known_exit_ids.insert(exit.id.clone()) {
             bail!("duplicate exit ID {:?}", exit.id);
         }
-        if exit.status != ExitStatus::Healthy {
+        if !routable(&exit.status) {
             continue;
         }
         if !marks.insert(exit.mark) {
@@ -48,21 +85,16 @@ pub fn compile(input: Input<'_>) -> Result<String> {
         exits.insert(exit.id.clone(), exit);
     }
 
-    let mut devices = HashMap::new();
+    let mut device_ids = HashSet::new();
     for device in input.devices {
         if device.node_id.is_empty() {
             bail!("device has empty node ID");
         }
-        if devices.insert(device.node_id.clone(), device).is_some() {
+        if !device_ids.insert(device.node_id.as_str()) {
             bail!("duplicate node ID {:?}", device.node_id);
         }
     }
 
-    let mut vpn_bindings = BTreeMap::<Ipv4Addr, &Exit>::new();
-    let mut direct_addresses = Vec::<Ipv4Addr>::new();
-    let mut local_addresses = Vec::<Ipv4Addr>::new();
-    let mut seen_nodes = HashSet::new();
-    let mut address_owners = BTreeMap::<Ipv4Addr, &str>::new();
     let assignments = input
         .assignments
         .iter()
@@ -71,62 +103,65 @@ pub fn compile(input: Input<'_>) -> Result<String> {
     if assignments.len() != input.assignments.len() {
         bail!("duplicate node assignment");
     }
+    // A node removed from the tailnet keeps its stored assignment so it resumes
+    // the same route if it rejoins; it must not block routing for everyone else.
+    let unknown_nodes = assignments
+        .keys()
+        .filter(|node_id| !device_ids.contains(*node_id))
+        .map(|node_id| (*node_id).to_owned())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+
+    let mut owners = BTreeMap::<Ipv4Addr, (&str, Route)>::new();
+    let mut conflicts = BTreeSet::<Ipv4Addr>::new();
     for device in input.devices {
-        let assignment = assignments.get(device.node_id.as_str()).copied();
-        if let Some(assignment) = assignment
-            && assignment.exit_id != LOCAL_ROUTE_ID
-            && !known_exit_ids.contains(&assignment.exit_id)
-        {
-            bail!(
-                "assignment references unknown exit {:?}",
-                assignment.exit_id
-            );
-        }
+        let route = match assignments.get(device.node_id.as_str()) {
+            None => match input.unassigned {
+                UnassignedPolicy::Block => Route::Block,
+                UnassignedPolicy::Local => Route::Local,
+                UnassignedPolicy::Direct => Route::Direct,
+            },
+            Some(assignment) if assignment.exit_id == LOCAL_ROUTE_ID => Route::Local,
+            Some(assignment) if assignment.exit_id == DIRECT_ROUTE_ID => Route::Direct,
+            // Unknown or unhealthy exits fail closed for this device only.
+            Some(assignment) => exits
+                .get(&assignment.exit_id)
+                .map_or(Route::Block, |exit| Route::Vpn(exit)),
+        };
         for address in &device.addresses {
             let std::net::IpAddr::V4(address) = address else {
                 continue;
             };
-            match assignment {
-                None => direct_addresses.push(*address),
-                Some(assignment) if assignment.exit_id == LOCAL_ROUTE_ID => {
-                    local_addresses.push(*address)
-                }
-                Some(assignment) => {
-                    if let Some(exit) = exits.get(&assignment.exit_id) {
-                        vpn_bindings.insert(*address, exit);
-                    }
-                }
+            if let Some((owner, _)) = owners.get(address)
+                && *owner != device.node_id
+            {
+                conflicts.insert(*address);
             }
+            owners.insert(*address, (&device.node_id, route));
         }
     }
-    for assignment in input.assignments {
-        if !seen_nodes.insert(&assignment.node_id) {
-            bail!("duplicate assignment for node {:?}", assignment.node_id);
-        }
-        let Some(device) = devices.get(&assignment.node_id) else {
-            bail!(
-                "assignment references unknown node {:?}",
-                assignment.node_id
-            );
+
+    let mut routes = BTreeMap::new();
+    let mut vpn_bindings = BTreeMap::<Ipv4Addr, &Exit>::new();
+    let mut direct_addresses = Vec::<Ipv4Addr>::new();
+    let mut local_addresses = Vec::<Ipv4Addr>::new();
+    for (address, (_, route)) in owners {
+        // An address claimed by two peers is ambiguous; forward nothing for it.
+        let route = if conflicts.contains(&address) {
+            Route::Block
+        } else {
+            route
         };
-        if assignment.exit_id == LOCAL_ROUTE_ID {
-            continue;
-        }
-        let exit = exits.get(&assignment.exit_id);
-        for address in &device.addresses {
-            let std::net::IpAddr::V4(address) = address else {
-                continue;
-            };
-            if let Some(owner) = address_owners.get(address)
-                && *owner != assignment.node_id
-            {
-                bail!("address {address} belongs to multiple nodes");
-            }
-            address_owners.insert(*address, &assignment.node_id);
-            if let Some(exit) = exit {
-                vpn_bindings.insert(*address, exit);
+        match route {
+            Route::Block => {}
+            Route::Local => local_addresses.push(address),
+            Route::Direct => direct_addresses.push(address),
+            Route::Vpn(exit) => {
+                vpn_bindings.insert(address, exit);
             }
         }
+        routes.insert(address, route.key());
     }
 
     let inverse_mask = !MARK_MASK;
@@ -208,7 +243,11 @@ pub fn compile(input: Input<'_>) -> Result<String> {
         )?;
     }
     writeln!(output, "  }}\n}}")?;
-    Ok(output)
+    Ok(Compiled {
+        ruleset: output,
+        routes,
+        unknown_nodes,
+    })
 }
 
 fn valid_interface(value: &str) -> bool {
@@ -226,58 +265,64 @@ mod tests {
     use super::*;
     use crate::domain::{Assignment, Device, Exit};
 
-    #[test]
-    fn compile_route_modes_policy() {
-        let healthy_exit = Exit {
-            id: "exit-ch".into(),
+    fn device(node_id: &str, last_octet: u8) -> Device {
+        Device {
+            node_id: node_id.into(),
+            display_name: String::new(),
+            addresses: vec![IpAddr::V4(Ipv4Addr::new(100, 64, 0, last_octet))],
+            online: true,
+            active: true,
+        }
+    }
+
+    fn assign(node_id: &str, exit_id: &str) -> Assignment {
+        Assignment {
+            node_id: node_id.into(),
+            exit_id: exit_id.into(),
+        }
+    }
+
+    fn exit(id: &str, status: ExitStatus) -> Exit {
+        Exit {
+            id: id.into(),
             interface: "proton0".into(),
             mark: 0x0000_0100,
-            status: ExitStatus::Healthy,
+            status,
             ..Exit::default()
-        };
-        let devices = vec![
-            Device {
-                node_id: "node-a".into(),
-                display_name: String::new(),
-                addresses: vec![IpAddr::V4(Ipv4Addr::new(100, 64, 0, 10))],
-                online: true,
-                active: true,
-            },
-            Device {
-                node_id: "node-b".into(),
-                display_name: String::new(),
-                addresses: vec![IpAddr::V4(Ipv4Addr::new(100, 64, 0, 11))],
-                online: true,
-                active: true,
-            },
-            Device {
-                node_id: "node-c".into(),
-                display_name: String::new(),
-                addresses: vec![IpAddr::V4(Ipv4Addr::new(100, 64, 0, 12))],
-                online: true,
-                active: true,
-            },
-        ];
-        let assignments = vec![
-            Assignment {
-                node_id: "node-a".into(),
-                exit_id: "exit-ch".into(),
-            },
-            Assignment {
-                node_id: "node-c".into(),
-                exit_id: LOCAL_ROUTE_ID.into(),
-            },
-        ];
-        let exits = vec![healthy_exit];
+        }
+    }
 
-        let ruleset = compile(Input {
+    fn compile_with(
+        exits: &[Exit],
+        devices: &[Device],
+        assignments: &[Assignment],
+        unassigned: UnassignedPolicy,
+    ) -> Compiled {
+        compile(Input {
             wan_interface: "eth0",
             tailscale_interface: "tailscale0",
-            exits: &exits,
-            devices: &devices,
-            assignments: &assignments,
+            exits,
+            devices,
+            assignments,
+            unassigned,
         })
-        .unwrap();
+        .unwrap()
+    }
+
+    #[test]
+    fn compile_route_modes_policy() {
+        let devices = vec![
+            device("node-a", 10),
+            device("node-b", 11),
+            device("node-c", 12),
+        ];
+        let assignments = vec![
+            assign("node-a", "exit-ch"),
+            assign("node-b", DIRECT_ROUTE_ID),
+            assign("node-c", LOCAL_ROUTE_ID),
+        ];
+        let exits = vec![exit("exit-ch", ExitStatus::Healthy)];
+        let compiled = compile_with(&exits, &devices, &assignments, UnassignedPolicy::Block);
 
         for fragment in [
             "policy drop",
@@ -291,41 +336,111 @@ mod tests {
             "oifname \"proton0\" ct mark & 0x0000ff00 == 0x00000100 masquerade",
         ] {
             assert!(
-                ruleset.contains(fragment),
-                "ruleset missing {fragment:?}\n{ruleset}"
+                compiled.ruleset.contains(fragment),
+                "ruleset missing {fragment:?}\n{}",
+                compiled.ruleset
             );
         }
+        assert_eq!(
+            compiled.routes[&Ipv4Addr::new(100, 64, 0, 10)],
+            "exit:exit-ch"
+        );
+        assert_eq!(compiled.routes[&Ipv4Addr::new(100, 64, 0, 11)], "direct");
+        assert_eq!(compiled.routes[&Ipv4Addr::new(100, 64, 0, 12)], "local");
     }
 
     #[test]
     fn blocks_an_assignment_to_an_unavailable_exit() {
-        let exits = vec![Exit {
-            id: "exit-ch".into(),
-            interface: "proton0".into(),
-            mark: 0x100,
-            status: ExitStatus::Failed,
-            ..Exit::default()
-        }];
-        let devices = vec![Device {
-            node_id: "node-a".into(),
-            display_name: String::new(),
-            addresses: vec![IpAddr::V4(Ipv4Addr::new(100, 64, 0, 10))],
-            online: true,
-            active: true,
-        }];
-        let assignments = vec![Assignment {
-            node_id: "node-a".into(),
-            exit_id: "exit-ch".into(),
-        }];
-        let ruleset = compile(Input {
-            wan_interface: "eth0",
-            tailscale_interface: "tailscale0",
-            exits: &exits,
-            devices: &devices,
-            assignments: &assignments,
-        })
-        .unwrap();
-        assert!(!ruleset.contains("ip saddr 100.64.0.10 oifname \"eth0\" accept"));
-        assert!(ruleset.contains("iifname \"tailscale0\" reject"));
+        let exits = vec![exit("exit-ch", ExitStatus::Failed)];
+        let devices = vec![device("node-a", 10)];
+        let assignments = vec![assign("node-a", "exit-ch")];
+        let compiled = compile_with(&exits, &devices, &assignments, UnassignedPolicy::Direct);
+        assert!(!compiled.ruleset.contains("ip saddr 100.64.0.10"));
+        assert!(compiled.ruleset.contains("iifname \"tailscale0\" reject"));
+        assert_eq!(compiled.routes[&Ipv4Addr::new(100, 64, 0, 10)], "block");
+    }
+
+    #[test]
+    fn degraded_exit_keeps_traffic_in_its_tunnel() {
+        let exits = vec![exit("exit-ch", ExitStatus::Degraded)];
+        let devices = vec![device("node-a", 10)];
+        let assignments = vec![assign("node-a", "exit-ch")];
+        let compiled = compile_with(&exits, &devices, &assignments, UnassignedPolicy::Direct);
+        assert!(
+            compiled
+                .ruleset
+                .contains("ip saddr 100.64.0.10 ct mark set")
+        );
+        assert!(
+            !compiled
+                .ruleset
+                .contains("ip saddr 100.64.0.10 oifname \"eth0\"")
+        );
+    }
+
+    #[test]
+    fn assignment_to_unknown_exit_blocks_only_that_device() {
+        let devices = vec![device("node-a", 10), device("node-b", 11)];
+        let assignments = vec![
+            assign("node-a", "exit-gone"),
+            assign("node-b", DIRECT_ROUTE_ID),
+        ];
+        let compiled = compile_with(&[], &devices, &assignments, UnassignedPolicy::Block);
+        assert!(!compiled.ruleset.contains("ip saddr 100.64.0.10"));
+        assert!(
+            compiled
+                .ruleset
+                .contains("ip saddr 100.64.0.11 oifname \"eth0\" accept")
+        );
+    }
+
+    #[test]
+    fn stale_node_assignment_does_not_break_other_devices() {
+        let devices = vec![device("node-a", 10)];
+        let assignments = vec![
+            assign("node-removed", LOCAL_ROUTE_ID),
+            assign("node-a", DIRECT_ROUTE_ID),
+        ];
+        let compiled = compile_with(&[], &devices, &assignments, UnassignedPolicy::Block);
+        assert!(
+            compiled
+                .ruleset
+                .contains("ip saddr 100.64.0.10 oifname \"eth0\" accept")
+        );
+        assert_eq!(compiled.unknown_nodes, vec!["node-removed".to_owned()]);
+    }
+
+    #[test]
+    fn unassigned_policy_controls_unassigned_devices() {
+        let devices = vec![device("node-a", 10)];
+        let blocked = compile_with(&[], &devices, &[], UnassignedPolicy::Block);
+        assert!(!blocked.ruleset.contains("ip saddr 100.64.0.10"));
+        assert_eq!(blocked.routes[&Ipv4Addr::new(100, 64, 0, 10)], "block");
+
+        let local = compile_with(&[], &devices, &[], UnassignedPolicy::Local);
+        assert!(
+            local
+                .ruleset
+                .contains("ip saddr 100.64.0.10 ip daddr { 10.0.0.0/8")
+        );
+
+        let direct = compile_with(&[], &devices, &[], UnassignedPolicy::Direct);
+        assert!(
+            direct
+                .ruleset
+                .contains("ip saddr 100.64.0.10 oifname \"eth0\" accept")
+        );
+    }
+
+    #[test]
+    fn address_claimed_by_two_nodes_is_blocked() {
+        let devices = vec![device("node-a", 10), device("node-b", 10)];
+        let assignments = vec![
+            assign("node-a", DIRECT_ROUTE_ID),
+            assign("node-b", DIRECT_ROUTE_ID),
+        ];
+        let compiled = compile_with(&[], &devices, &assignments, UnassignedPolicy::Direct);
+        assert!(!compiled.ruleset.contains("ip saddr 100.64.0.10"));
+        assert_eq!(compiled.routes[&Ipv4Addr::new(100, 64, 0, 10)], "block");
     }
 }

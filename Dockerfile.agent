@@ -12,10 +12,20 @@ RUN cargo build --locked --release --bin gateway-agent --bin gateway-ui \
 FROM debian:12.11-slim
 
 ARG TARGETARCH
+# Bumping TAILSCALE_VERSION requires updating both checksums; the build fails otherwise.
+# Source: https://pkgs.tailscale.com/stable/tailscale_<version>_<arch>.tgz.sha256
 ARG TAILSCALE_VERSION=1.102.1
-RUN apt-get update \
+ARG TAILSCALE_SHA256_AMD64=4eab0d2c268ec1f81dc50a5ef9805ea993fc08dc52ede5a6d8ddd44ef6f9df0f
+ARG TAILSCALE_SHA256_ARM64=43973827540d8a4db44b6b662037e8e75c98a2797cef1ce76d214becc48c470c
+RUN case "$TARGETARCH" in \
+        amd64) tailscale_sha256="$TAILSCALE_SHA256_AMD64" ;; \
+        arm64) tailscale_sha256="$TAILSCALE_SHA256_ARM64" ;; \
+        *) echo "unsupported TARGETARCH: $TARGETARCH" >&2; exit 1 ;; \
+    esac \
+    && apt-get update \
     && apt-get install --no-install-recommends -y ca-certificates conntrack curl iproute2 nftables tcpdump wireguard-tools \
     && curl -fsSLo /tmp/tailscale.tgz "https://pkgs.tailscale.com/stable/tailscale_${TAILSCALE_VERSION}_${TARGETARCH}.tgz" \
+    && echo "$tailscale_sha256  /tmp/tailscale.tgz" | sha256sum --check - \
     && tar -xzf /tmp/tailscale.tgz -C /tmp \
     && install -m 0755 "/tmp/tailscale_${TAILSCALE_VERSION}_${TARGETARCH}/tailscale" /usr/local/bin/tailscale \
     && install -m 0755 "/tmp/tailscale_${TAILSCALE_VERSION}_${TARGETARCH}/tailscaled" /usr/local/bin/tailscaled \

@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 
 use crate::catalog::StaticCatalog;
 use crate::domain::{
-    Assignment, DesiredState, Exit, ExitStatus, LOCAL_ROUTE_ID, SCHEMA_VERSION, Server,
+    Assignment, DesiredState, Exit, ExitStatus, SCHEMA_VERSION, Server, is_builtin_route,
 };
 use crate::proton::AccountLimits;
 use crate::reconcile::Reconciler;
@@ -93,6 +93,7 @@ async fn get_status(State(api): State<Arc<Api>>) -> Response {
             "activeExits": exits.len(),
             "exitLimit": exit_limit,
             "dryRun": api.reconciler.dry_run(),
+            "unassignedPolicy": api.reconciler.unassigned_policy().as_str(),
         }),
     )
 }
@@ -106,18 +107,15 @@ async fn get_devices(State(api): State<Arc<Api>>) -> Response {
         Ok(desired) => desired,
         Err(error) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, error),
     };
-    let assignments: HashMap<_, _> = desired
+    let mut assignments: HashMap<_, _> = desired
         .assignments
         .into_iter()
         .map(|assignment| (assignment.node_id, assignment.exit_id))
         .collect();
-    let result: Vec<_> = devices
+    let mut result: Vec<_> = devices
         .into_iter()
         .map(|device| {
-            let exit_id = assignments
-                .get(&device.node_id)
-                .cloned()
-                .unwrap_or_default();
+            let exit_id = assignments.remove(&device.node_id).unwrap_or_default();
             let mut value = serde_json::to_value(device).expect("serialize device");
             if !exit_id.is_empty() {
                 value["exitId"] = json!(exit_id);
@@ -125,6 +123,20 @@ async fn get_devices(State(api): State<Arc<Api>>) -> Response {
             value
         })
         .collect();
+    // Assignments for nodes that left the tailnet are listed so they can be cleared.
+    let mut missing: Vec<_> = assignments.into_iter().collect();
+    missing.sort();
+    result.extend(missing.into_iter().map(|(node_id, exit_id)| {
+        json!({
+            "nodeId": node_id,
+            "displayName": "",
+            "addresses": [],
+            "online": false,
+            "active": false,
+            "missing": true,
+            "exitId": exit_id,
+        })
+    }));
     json_response(StatusCode::OK, json!(result))
 }
 
@@ -266,21 +278,12 @@ async fn assign_device(
         );
     }
     let result = api.store.update(input.revision, |desired| {
-        if !desired.exits.iter().any(|exit| exit.id == input.exit_id) {
+        if !is_builtin_route(&input.exit_id)
+            && !desired.exits.iter().any(|exit| exit.id == input.exit_id)
+        {
             anyhow::bail!("unknown exit");
         }
-        let assignment = Assignment {
-            node_id: node_id.clone(),
-            exit_id: input.exit_id,
-        };
-        match desired
-            .assignments
-            .iter_mut()
-            .find(|assignment| assignment.node_id == node_id)
-        {
-            Some(existing) => *existing = assignment,
-            None => desired.assignments.push(assignment),
-        }
+        set_assignment(desired, &node_id, &input.exit_id);
         Ok(())
     });
     finish_mutation(api, result).await
@@ -292,9 +295,7 @@ async fn disable_device(
     Json(input): Json<MutationRequest>,
 ) -> Response {
     let result = api.store.update(input.revision, |desired| {
-        desired
-            .assignments
-            .retain(|assignment| assignment.node_id != node_id);
+        disable_node_route(desired, &node_id);
         Ok(())
     });
     finish_mutation(api, result).await
@@ -321,8 +322,8 @@ async fn route_device(
         Err(error) => return error_response(StatusCode::SERVICE_UNAVAILABLE, error),
     };
     let result = api.store.update(input.revision, |desired| {
-        if input.server_id == LOCAL_ROUTE_ID {
-            route_node_local(desired, &node_id);
+        if is_builtin_route(&input.server_id) {
+            set_assignment(desired, &node_id, &input.server_id);
             Ok(())
         } else {
             let server = api.catalog.resolve(&input.server_id)?;
@@ -364,13 +365,15 @@ fn route_node_to_server(
     {
         exit.id.clone()
     } else {
-        let replaceable = previous_exit_id.as_ref().and_then(|exit_id| {
-            let shared = desired
-                .assignments
-                .iter()
-                .any(|assignment| assignment.node_id != node_id && assignment.exit_id == *exit_id);
-            (!shared).then_some(exit_id.clone())
-        });
+        let replaceable = previous_exit_id
+            .as_ref()
+            .filter(|exit_id| !is_builtin_route(exit_id))
+            .and_then(|exit_id| {
+                let shared = desired.assignments.iter().any(|assignment| {
+                    assignment.node_id != node_id && assignment.exit_id == *exit_id
+                });
+                (!shared).then_some(exit_id.clone())
+            });
         if replaceable.is_none() {
             enforce_exit_limit(desired.exits.len(), exit_limit)?;
         }
@@ -428,7 +431,8 @@ fn disable_node_route(desired: &mut DesiredState, node_id: &str) {
     remove_unused_previous_exit(desired, previous_exit_id.as_deref());
 }
 
-fn route_node_local(desired: &mut DesiredState, node_id: &str) {
+/// Points a node at an exit or built-in route and garbage-collects the exit it left.
+fn set_assignment(desired: &mut DesiredState, node_id: &str, exit_id: &str) {
     let previous_exit_id = desired
         .assignments
         .iter()
@@ -439,19 +443,24 @@ fn route_node_local(desired: &mut DesiredState, node_id: &str) {
         .iter_mut()
         .find(|assignment| assignment.node_id == node_id)
     {
-        Some(assignment) => assignment.exit_id = LOCAL_ROUTE_ID.into(),
+        Some(assignment) => assignment.exit_id = exit_id.into(),
         None => desired.assignments.push(Assignment {
             node_id: node_id.into(),
-            exit_id: LOCAL_ROUTE_ID.into(),
+            exit_id: exit_id.into(),
         }),
     }
-    remove_unused_previous_exit(desired, previous_exit_id.as_deref());
+    if previous_exit_id.as_deref() != Some(exit_id) {
+        remove_unused_previous_exit(desired, previous_exit_id.as_deref());
+    }
 }
 
 fn remove_unused_previous_exit(desired: &mut DesiredState, exit_id: Option<&str>) {
     let Some(exit_id) = exit_id else {
         return;
     };
+    if is_builtin_route(exit_id) {
+        return;
+    }
     if !desired
         .assignments
         .iter()
@@ -510,6 +519,7 @@ fn error_response(status: StatusCode, error: impl std::fmt::Display) -> Response
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::{DIRECT_ROUTE_ID, LOCAL_ROUTE_ID};
 
     fn server(id: &str) -> Server {
         Server {
@@ -550,12 +560,38 @@ mod tests {
     }
 
     #[test]
-    fn local_route_collects_the_previous_vpn_exit() {
+    fn builtin_routes_collect_the_previous_vpn_exit() {
+        for route in [LOCAL_ROUTE_ID, DIRECT_ROUTE_ID] {
+            let mut desired = DesiredState::default();
+            route_node_to_server(&mut desired, "node-a", &server("ch-1"), "exit-ch", None).unwrap();
+            set_assignment(&mut desired, "node-a", route);
+            assert!(desired.exits.is_empty());
+            assert_eq!(desired.assignments[0].exit_id, route);
+        }
+    }
+
+    #[test]
+    fn leaving_a_builtin_route_creates_a_real_exit() {
+        for route in [LOCAL_ROUTE_ID, DIRECT_ROUTE_ID] {
+            let mut desired = DesiredState::default();
+            set_assignment(&mut desired, "node-a", route);
+            route_node_to_server(&mut desired, "node-a", &server("ch-1"), "exit-ch", None).unwrap();
+            assert_eq!(desired.exits.len(), 1);
+            assert_eq!(desired.exits[0].id, "exit-ch");
+            assert_eq!(desired.assignments[0].exit_id, "exit-ch");
+        }
+    }
+
+    #[test]
+    fn disabling_a_node_collects_its_unshared_exit() {
         let mut desired = DesiredState::default();
         route_node_to_server(&mut desired, "node-a", &server("ch-1"), "exit-ch", None).unwrap();
-        route_node_local(&mut desired, "node-a");
+        route_node_to_server(&mut desired, "node-b", &server("ch-1"), "unused", None).unwrap();
+        disable_node_route(&mut desired, "node-a");
+        assert_eq!(desired.exits.len(), 1);
+        disable_node_route(&mut desired, "node-b");
         assert!(desired.exits.is_empty());
-        assert_eq!(desired.assignments[0].exit_id, LOCAL_ROUTE_ID);
+        assert!(desired.assignments.is_empty());
     }
 
     #[test]

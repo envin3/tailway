@@ -4,6 +4,45 @@ use serde::{Deserialize, Serialize};
 
 pub const SCHEMA_VERSION: u32 = 1;
 pub const LOCAL_ROUTE_ID: &str = "__local__";
+pub const DIRECT_ROUTE_ID: &str = "__direct__";
+
+pub fn is_builtin_route(exit_id: &str) -> bool {
+    exit_id == LOCAL_ROUTE_ID || exit_id == DIRECT_ROUTE_ID
+}
+
+/// Route applied to tailnet peers that have no explicit assignment.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum UnassignedPolicy {
+    #[default]
+    Block,
+    Local,
+    Direct,
+}
+
+impl UnassignedPolicy {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Block => "block",
+            Self::Local => "local",
+            Self::Direct => "direct",
+        }
+    }
+}
+
+impl std::str::FromStr for UnassignedPolicy {
+    type Err = anyhow::Error;
+
+    fn from_str(value: &str) -> anyhow::Result<Self> {
+        match value {
+            "block" => Ok(Self::Block),
+            "local" => Ok(Self::Local),
+            "direct" => Ok(Self::Direct),
+            other => {
+                anyhow::bail!("invalid UNASSIGNED_POLICY {other:?}; use block, local, or direct")
+            }
+        }
+    }
+}
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -31,6 +70,8 @@ pub struct Exit {
     #[serde(skip)]
     pub table: u32,
     pub status: ExitStatus,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub status_detail: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub public_ip: String,
 }
