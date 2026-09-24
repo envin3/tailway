@@ -68,6 +68,9 @@ pub enum Resolution {
         exit_id: String,
     },
     Server(Upstream),
+    /// No plan has been published yet (agent starting): nobody is known, so
+    /// fail closed rather than send a Proton device's lookups over the WAN.
+    NotReady,
 }
 
 impl Resolution {
@@ -76,6 +79,7 @@ impl Resolution {
             Resolution::Proton { .. } => "proton",
             Resolution::Blocked { .. } => "blocked",
             Resolution::Server(_) => "server",
+            Resolution::NotReady => "starting",
         }
     }
 }
@@ -153,14 +157,14 @@ pub fn plan(input: PlanInput<'_>) -> HashMap<Ipv4Addr, Resolution> {
 /// The current per-client plan, replaced atomically after every reconcile.
 pub struct Resolver {
     defaults: Defaults,
-    plan: RwLock<Arc<HashMap<Ipv4Addr, Resolution>>>,
+    plan: RwLock<Option<Arc<HashMap<Ipv4Addr, Resolution>>>>,
 }
 
 impl Resolver {
     pub fn new(defaults: Defaults) -> Self {
         Self {
             defaults,
-            plan: RwLock::new(Arc::new(HashMap::new())),
+            plan: RwLock::new(None),
         }
     }
 
@@ -172,15 +176,19 @@ impl Resolver {
         *self
             .plan
             .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Arc::new(plan);
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::new(plan));
     }
 
-    /// Clients not yet known to the gateway use the default server.
+    /// Clients not in the published plan (new devices) use the default server.
     pub fn resolve(&self, client: Ipv4Addr) -> Resolution {
-        self.plan
+        let plan = self
+            .plan
             .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get(&client)
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(plan) = plan.as_ref() else {
+            return Resolution::NotReady;
+        };
+        plan.get(&client)
             .cloned()
             .unwrap_or(Resolution::Server(Upstream::server(self.defaults.server)))
     }
@@ -326,7 +334,7 @@ async fn answer(
             .await
             .ok()
             .or_else(|| error_response(query, SERVFAIL)),
-        Resolution::Blocked { .. } => error_response(query, SERVFAIL),
+        Resolution::Blocked { .. } | Resolution::NotReady => error_response(query, SERVFAIL),
         Resolution::Proton {
             upstream, fallback, ..
         } => match exchange(upstream, query, transport).await {
@@ -567,6 +575,8 @@ mod tests {
     #[test]
     fn unknown_clients_use_the_default_server() {
         let resolver = Resolver::new(DEFAULTS);
+        assert_eq!(resolver.resolve(address(99)), Resolution::NotReady);
+        resolver.replace(HashMap::new());
         assert_eq!(
             resolver.resolve(address(99)),
             Resolution::Server(Upstream::server(DEFAULTS.server))
@@ -707,6 +717,17 @@ mod tests {
         let mut response = vec![0; usize::from(stream.read_u16().await.unwrap())];
         stream.read_exact(&mut response).await.unwrap();
         assert!(response.ends_with(b"tcp-upstream"));
+    }
+
+    #[tokio::test]
+    async fn answers_servfail_until_the_first_plan_is_published() {
+        let resolver = Arc::new(Resolver::new(DEFAULTS));
+        let server = DnsServer::bind("127.0.0.1:0".parse().unwrap())
+            .await
+            .unwrap();
+        let address = server.local_addr().unwrap();
+        tokio::spawn(server.run(resolver, |_| true));
+        assert_eq!(ask_udp(address, 5).await.unwrap()[3] & 0x0f, SERVFAIL);
     }
 
     #[tokio::test]
