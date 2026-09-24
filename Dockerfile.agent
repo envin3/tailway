@@ -1,0 +1,26 @@
+ARG RUST_IMAGE=rust:1.97.1-bookworm
+FROM ${RUST_IMAGE} AS build
+
+WORKDIR /src
+COPY Cargo.toml Cargo.lock ./
+COPY src ./src
+COPY cmd/gateway-ui/static ./cmd/gateway-ui/static
+RUN cargo build --locked --release --bin gateway-agent --bin gateway-ui \
+    && install -Dm0755 target/release/gateway-agent /out/gateway-agent \
+    && install -Dm0755 target/release/gateway-ui /out/gateway-ui
+
+FROM debian:12.11-slim
+
+ARG TARGETARCH
+ARG TAILSCALE_VERSION=1.102.1
+RUN apt-get update \
+    && apt-get install --no-install-recommends -y ca-certificates conntrack curl iproute2 nftables tcpdump wireguard-tools \
+    && curl -fsSLo /tmp/tailscale.tgz "https://pkgs.tailscale.com/stable/tailscale_${TAILSCALE_VERSION}_${TARGETARCH}.tgz" \
+    && tar -xzf /tmp/tailscale.tgz -C /tmp \
+    && install -m 0755 "/tmp/tailscale_${TAILSCALE_VERSION}_${TARGETARCH}/tailscale" /usr/local/bin/tailscale \
+    && install -m 0755 "/tmp/tailscale_${TAILSCALE_VERSION}_${TARGETARCH}/tailscaled" /usr/local/bin/tailscaled \
+    && rm -rf /var/lib/apt/lists/* /tmp/tailscale*
+
+COPY --from=build /out/gateway-agent /usr/local/bin/gateway-agent
+COPY --from=build /out/gateway-ui /usr/local/bin/gateway-ui
+ENTRYPOINT ["/usr/local/bin/gateway-agent"]

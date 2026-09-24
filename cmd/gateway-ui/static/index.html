@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Exit Gateway Console</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div class="shell">
+    <aside>
+      <div class="brand"><span class="brand-mark">E</span><span>Exit Gateway</span></div>
+      <nav aria-label="Console views">
+        <button class="nav-item active" data-view="overview">Overview</button>
+        <button class="nav-item" data-view="account">Proton account</button>
+        <button class="nav-item" data-view="servers">Server selector</button>
+        <button class="nav-item" data-view="exits">Active exits</button>
+        <button class="nav-item" data-view="devices">Nodes</button>
+      </nav>
+      <div class="adapter"><span>Catalog adapter</span><strong>Static import</strong></div>
+    </aside>
+    <main>
+      <header>
+        <div><p class="eyebrow">Tailscale policy router</p><h1 id="view-title">Overview</h1></div>
+        <div class="health"><span id="health-dot"></span><span id="health-label">Connecting</span></div>
+      </header>
+      <div id="alert" class="alert hidden" role="alert"></div>
+
+      <section id="overview" class="view active">
+        <div class="metrics">
+          <article><span>Agent state</span><strong id="metric-state">Unknown</strong></article>
+          <article><span>Active exits</span><strong id="metric-exits">0</strong></article>
+          <article><span>Assigned devices</span><strong id="metric-devices">0</strong></article>
+          <article><span>Policy revision</span><strong id="metric-revision">0</strong></article>
+        </div>
+        <div class="section-heading"><div><h2>Routing posture</h2><p>VPN failures remain blocked; disabled nodes use direct Internet.</p></div><button id="refresh">Refresh</button></div>
+        <div class="posture-grid">
+          <div><span class="posture-status good">Available</span><h3>Direct WAN</h3><p>Disabled nodes use the gateway's ordinary Internet connection.</p></div>
+          <div><span class="posture-status good">Enforced</span><h3>IPv6 forwarding</h3><p>The first release exposes IPv4 routing only.</p></div>
+          <div><span class="posture-status good">Masked</span><h3>Connection marks</h3><p>Only the router-owned mark range is changed.</p></div>
+        </div>
+      </section>
+
+      <section id="account" class="view">
+        <div class="section-heading"><div><h2>Proton VPN account</h2><p>The password is sent only to Proton during sign-in and is not stored by this service.</p></div></div>
+        <div class="account-panel">
+          <form id="proton-login-form" class="hidden">
+            <label>Username<input id="proton-username" autocomplete="username" required maxlength="320"></label>
+            <label>Password<input id="proton-password" type="password" autocomplete="current-password" required maxlength="1024"></label>
+            <button>Sign in</button>
+          </form>
+          <form id="proton-totp-form" class="hidden">
+            <label>Two-factor code<input id="proton-totp" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}|[0-9]{8}" required maxlength="8"></label>
+            <button>Verify</button>
+          </form>
+          <div id="proton-account-summary" class="hidden">
+            <dl><div><dt>Account</dt><dd id="proton-account-name"></dd></div><div><dt>Plan</dt><dd id="proton-plan"></dd></div><div><dt>Connections</dt><dd id="proton-connections"></dd></div><div><dt>Core version</dt><dd id="proton-core-version"></dd></div></dl>
+            <button id="proton-logout" class="danger">Sign out</button>
+          </div>
+          <div id="proton-unavailable" class="hidden"><strong>Account broker unavailable</strong><p>Start the broker container to enable Proton login and live server discovery.</p></div>
+        </div>
+      </section>
+
+      <section id="servers" class="view">
+        <div class="section-heading"><div><h2>Proton VPN servers</h2><p id="server-source">Imported WireGuard configurations available for routing.</p></div></div>
+        <div class="toolbar"><input id="server-search" type="search" placeholder="Search country, city, or server" autocomplete="off"><span id="server-count"></span></div>
+        <fieldset id="server-feature-filters" class="feature-filters" aria-label="Server features">
+          <label><input type="checkbox" value="secure-core">Secure Core</label>
+          <label><input type="checkbox" value="p2p">P2P</label>
+          <label><input type="checkbox" value="streaming">Streaming</label>
+        </fieldset>
+        <div id="server-list" class="server-list"></div>
+        <div class="pagination"><button id="server-page-prev" class="secondary">Previous</button><span id="server-page-label">1 / 1</span><button id="server-page-next" class="secondary">Next</button></div>
+      </section>
+
+      <section id="exits" class="view">
+        <div class="section-heading"><div><h2>Active Proton exits</h2><p>Each distinct selected server has one shared tunnel.</p></div></div>
+        <div id="exit-list" class="exit-grid"></div>
+      </section>
+
+      <section id="devices" class="view">
+        <div class="section-heading"><div><h2>Tailnet nodes</h2><p>Select Proton VPN, direct Internet, or local-only access for each node.</p></div></div>
+        <div class="toolbar"><input id="node-search" type="search" placeholder="Search node name or address" autocomplete="off"><span id="node-count"></span></div>
+        <div class="table-wrap"><table><thead><tr><th>Node</th><th>Tailnet address</th><th>State</th><th>Gateway activity</th><th>VPN server</th></tr></thead><tbody id="device-list"></tbody></table></div>
+      </section>
+    </main>
+  </div>
+  <dialog id="exit-dialog">
+    <form method="dialog" id="exit-form">
+      <p class="eyebrow">Create Proton exit</p><h2 id="dialog-server">Server</h2>
+      <label>Exit name<input id="exit-name" maxlength="48" required></label>
+      <div class="dialog-actions"><button value="cancel" class="secondary">Cancel</button><button id="confirm-exit" value="default">Create exit</button></div>
+    </form>
+  </dialog>
+  <script src="/app.js" defer></script>
+</body>
+</html>

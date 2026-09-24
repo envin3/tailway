@@ -1,0 +1,126 @@
+# Proton Policy Router
+
+Experimental IPv4 Tailscale exit-node gateway for Linux container hosts. One Tailscale identity classifies devices by stable node ID and routes each assigned device through a selected Proton WireGuard exit. Unraid is one deployment option.
+
+The gateway agent and management console are implemented in Rust and run as supervised processes in one gateway container. Both binaries share one crate so the persisted schema, API contracts, and policy model remain synchronized.
+
+## Current scope
+
+Implemented:
+
+- Fail-closed `nftables` policy compiler with masked connection marks.
+- Explicit WireGuard interfaces, route tables, and `ip rule` entries without `wg-quick` route side effects.
+- Static, administrator-approved Proton catalog adapter.
+- Stable Tailscale node-ID assignments with atomic versioned state.
+- Unix-socket management API and a dropped-privilege TLS console supervised in the gateway container.
+- Proton account login, TOTP, and live server discovery through Proton's official Linux API core.
+- Multiple concurrent exits, IPv4-only forwarding, per-node direct/local/VPN routing, and stale-resource cleanup.
+
+Not yet release-proven:
+
+- Original Tailscale client source visibility on the target host and Tailscale versions.
+- Multiple concurrent Proton tunnels with the account's generated credentials and potentially overlapping tunnel addresses.
+- Transactional server replacement and the namespace-sidecar fallback.
+- Full audit persistence, egress public-IP verification, upgrade migration, and performance evidence.
+
+These are release gates, not optional enhancements. Follow [docs/spikes/README.md](docs/spikes/README.md) before routing real client traffic.
+
+## Prepare the host
+
+Copy this directory to persistent storage on a Linux Docker Compose host, then run commands from that directory. On Unraid, `/mnt/user/appdata/proton-policy-router` is a suitable location.
+
+```sh
+cp .env.example .env
+mkdir -p config proton-configs proton-broker-state run state tls ui-auth
+cp config/catalog.example.json config/catalog.json
+chgrp "$CONTROL_GID" config proton-configs proton-broker-state run state tls ui-auth
+chmod 770 proton-broker-state run state
+chmod 2770 config proton-configs
+chmod 750 tls ui-auth
+```
+
+Set `HOST_BIND_IP` to a trusted host address and set the shared `CONTROL_GID` in `.env`. If the host already runs Tailscale, set `HOST_TAILSCALE_UDP_PORT` to a free UDP port such as `41642`; the container still listens on `41641`. Keep the project on a dedicated Docker bridge and do not attach unrelated containers.
+
+## Import Proton exits
+
+Generate WireGuard configurations from Proton's supported account portal. Put each configuration in `proton-configs/`, assign it to `CONTROL_GID`, and set mode `0640`, then list only its relative filename and public metadata in `config/catalog.json`.
+
+Do not put private keys in the catalog, Compose file, `.env`, this repository, or the Obsidian notes.
+
+## Configure console security
+
+Generate the bcrypt password hash and CSRF secret:
+
+```sh
+./scripts/create-ui-secrets.sh
+```
+
+Provide a certificate valid for the host's trusted LAN or tailnet name or address:
+
+```text
+tls/tls.crt
+tls/tls.key
+```
+
+Assign both TLS files to `CONTROL_GID` with mode `0640`. The UI child runs as UID `65532` with this group and does not rely on container root to bypass host file modes.
+
+The console refuses to start without TLS, a bcrypt hash, and a 32-byte-or-longer CSRF token. Publish port `8443` only on a trusted LAN or tailnet address and never forward it from the Internet.
+
+## Build and enroll
+
+```sh
+docker compose build
+docker compose up -d gateway-agent
+docker compose exec gateway-agent tailscale up --advertise-exit-node --accept-dns=false --netfilter-mode=off
+```
+
+Approve the exit-node advertisement in the Tailscale admin console. Enrollment state persists in the Compose-managed `tailscale-state` volume; do not keep an auth key in Compose after enrollment. Include this volume in host backups.
+
+Check that the baseline and supervised UI are active:
+
+```sh
+docker compose exec gateway-agent nft list table inet proton_policy_router
+docker compose exec gateway-agent ip rule show
+docker compose top gateway-agent
+```
+
+Open `https://<HOST_BIND_IP>:8443` and authenticate as `admin` with the password used by the secret generator.
+
+## Proton account discovery
+
+Open **Proton account** in the console and sign in there. The password and TOTP code are sent only over the authenticated TLS console to the capability-free broker; they are never sent to the routing agent or stored by this application. Proton core persists refreshable session data in `proton-broker-state/` with owner-only file permissions, so protect and back up that directory as credential material.
+
+This integration uses Proton's official open-source Linux client internals pinned to `proton-vpn-api-core` 5.5.6. It is not a documented public third-party API and may require compatibility updates when Proton changes the package. TOTP is supported; FIDO2 and additional human-verification challenges are not yet supported.
+
+Live account discovery groups servers by country, shows 12 countries per page, and renders at most 25 servers at a time inside the expanded country. Secure Core, P2P, and Streaming filters can be combined to require every selected feature. Select **Add** to generate a WireGuard profile from the authenticated Proton session and register that server in the routing catalog. Select **Update** later to refresh its endpoint and key material. Generated profiles remain in `proton-configs/` with mode `0640` and are never returned to the browser or routing API.
+
+## Console workflow
+
+1. Open **Nodes** to see every routable Tailscale peer known to the gateway, including offline peers. The gateway node itself is excluded because it cannot route through itself.
+2. Select an imported Proton VPN server, **Disabled · Direct Internet**, or **Local only · No Internet** on each node row.
+3. Wait for the selected server status to become healthy.
+4. Select this single router as the exit node on each client.
+5. Run the Phase 0 public-IP, DNS, failure, and packet-capture checks.
+
+The Nodes table reports Tailscale **Gateway activity** from each peer's `Active` status. `Observed` means the gateway currently has an active data path to that peer; `Not observed` means no active path is visible. Tailscale does not expose a client's selected-exit preference in reverse to the gateway, so this is operational evidence rather than proof that the client selected this exit node. Confirm the exact preference on the client with `tailscale status --json` when needed.
+
+The agent reuses one tunnel when multiple nodes choose the same server and removes a tunnel when its final assignment is disabled or moved. While Proton is authenticated, the agent reads `maxConnections` from the broker over its protected Unix socket and rejects creation of a distinct tunnel at that account limit; sharing or replacing an existing tunnel remains allowed. Without authenticated account metadata, the mark space supports up to 255 runtime tunnels. Host resources still apply. **Server selector** and **Active exits** remain available as advanced catalog and tunnel-status views.
+
+`Disabled` keeps the Tailscale exit node usable and forwards through the gateway's ordinary Internet connection without Proton. `Local only` blocks public Internet forwarding while preserving direct tailnet connectivity and access to private or link-local IPv4 destinations through the gateway. A selected Proton route remains fail-closed if its tunnel becomes unhealthy.
+
+Direct mode inherits the Docker host's egress path. To guarantee that **Disabled** means no VPN, disable any host-level VPN or its autoconnect setting; otherwise direct traffic will follow that host VPN even though it does not use a router-managed Proton tunnel.
+
+## Development
+
+```sh
+cargo test
+cargo build --bins
+```
+
+The minimum supported toolchain is Rust 1.85. The agent supports `DRY_RUN=true`; it writes generated policy to the runtime directory without running `ip`, `wg`, or `nft`. Dry-run does not emulate Tailscale peer discovery.
+
+## Security model
+
+The agent runs as root only inside its private network namespace with `NET_ADMIN`, `SETUID`, and `SETGID` plus `/dev/net/tun`. The latter two capabilities are used only to launch the UI as UID `65532` with `CONTROL_GID`; the UI child does not retain them, and `no-new-privileges` prevents reacquisition. The container has no Docker socket, host network, `SYS_ADMIN`, `SYS_MODULE`, or privileged mode. An unexpected UI exit terminates the container so Compose restarts both processes. Because both processes share one container and mount namespace, the UI no longer has the former container-level filesystem isolation from agent mounts. The Proton account broker remains a separate capability-free container and never returns account session or private WireGuard material through its APIs.
+
+API requests accept logical node, server, and exit IDs only. System commands use direct argument arrays. State writes use `0600` temporary files, `fsync`, optimistic revisions, and atomic rename.

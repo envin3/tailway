@@ -1,0 +1,13 @@
+.git
+.env
+run
+state
+tailscale-state
+proton-configs
+proton-broker-state
+ui-auth
+tls
+docs/spikes/evidence
+gateway-agent
+gateway-ui
+target

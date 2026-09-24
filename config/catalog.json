@@ -1,0 +1,62 @@
+{
+  "schemaVersion": 1,
+  "servers": [
+    {
+      "city": "Milan",
+      "configFile": "live-3bb5e7b8ff19532e22115650.conf",
+      "country": "IT",
+      "features": [
+        "p2p",
+        "streaming"
+      ],
+      "id": "RE7S2Li_pBkMN6sPZN3bk92Rg_ixVJY3uZ7YoE4-1-XaYf26bcXyYdirs8Ww62N4OUYOyHLVFSQn6Snp4_aQ-w==",
+      "name": "IT#100"
+    },
+    {
+      "city": "New York",
+      "configFile": "live-fec06b023ab208e5246c870c.conf",
+      "country": "US",
+      "features": [
+        "p2p",
+        "streaming",
+        "ipv6"
+      ],
+      "id": "xTtNYOufIvUtkrqSH7LYfoFs5taNzfDYtMWIxkU-XPKTBIKM2hIRZLpGWJPqggKHAvEXfwpM3Bb5rxcP3JVEKA==",
+      "name": "US-NY#166"
+    },
+    {
+      "city": "Andorra la Vella",
+      "configFile": "live-1071b01721b229104f1dedd0.conf",
+      "country": "AD",
+      "features": [
+        "p2p",
+        "streaming"
+      ],
+      "id": "X0KhHbLZLSZBG6l44PMuGVY9qWvCigkyz7e3FCtPBR08t4qx2YP7btOcI6oIfCTehRQNdD1i8xt3Mn-HBlWmyg==",
+      "name": "AD#1"
+    },
+    {
+      "city": "Andorra la Vella",
+      "configFile": "live-04a5bc08eee78cb1c519a97d.conf",
+      "country": "AD",
+      "features": [
+        "p2p",
+        "streaming"
+      ],
+      "id": "DIUukXSTjqr1KvfyfE0PEOhkkLjrzeanRy80cXKs6ldp7969c6JA5l-9s-QXVZBmB-nQGWXUbc8YO05_v3MCQg==",
+      "name": "AD#10"
+    },
+    {
+      "city": "Amsterdam",
+      "configFile": "live-ebc48746153669b2086dd135.conf",
+      "country": "NL",
+      "features": [
+        "p2p",
+        "streaming",
+        "ipv6"
+      ],
+      "id": "-WEfCvKFB_bt2p3Xhqacq_DsUQmYF4P-ZSDSIQv01_AfJlGjJmElYey6t36eMWpL6MBoBzbm3yyYp0c8jtqqHA==",
+      "name": "NL#227"
+    }
+  ]
+}

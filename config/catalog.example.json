@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "servers": [
+    {
+      "id": "proton-ch-01",
+      "country": "CH",
+      "city": "Zurich",
+      "name": "Switzerland 01",
+      "features": ["standard"],
+      "configFile": "ch-01.conf"
+    },
+    {
+      "id": "proton-us-01",
+      "country": "US",
+      "city": "New York",
+      "name": "United States 01",
+      "features": ["standard"],
+      "configFile": "us-01.conf"
+    }
+  ]
+}

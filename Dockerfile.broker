@@ -1,0 +1,29 @@
+FROM debian:13-slim
+
+ARG PROTON_RELEASE_URL=https://repo.protonvpn.com/debian/dists/stable/main/binary-all/protonvpn-stable-release_1.0.8_all.deb
+ARG PROTON_RELEASE_SHA256=0b14e71586b22e498eb20926c48c7b434b751149b1f2af9902ef1cfe6b03e180
+ARG PROTON_CORE_VERSION=5.5.6
+
+RUN apt-get update \
+    && apt-get install --no-install-recommends -y ca-certificates gnupg python3 wget \
+    && wget -qO /tmp/proton-release.deb "$PROTON_RELEASE_URL" \
+    && echo "$PROTON_RELEASE_SHA256  /tmp/proton-release.deb" | sha256sum --check - \
+    && dpkg -i /tmp/proton-release.deb \
+    && apt-get update \
+    && apt-get install --no-install-recommends -y python3-proton-vpn-api-core \
+    && python3 -c "import importlib.metadata as m; actual=m.version('proton-vpn-api-core'); expected='$PROTON_CORE_VERSION'; assert actual == expected, f'expected proton-vpn-api-core {expected}, got {actual}'" \
+    && rm -rf /var/lib/apt/lists/* /tmp/proton-release.deb
+
+COPY --chown=65533:1000 proton-broker/proton_broker /app/proton_broker
+
+ENV HOME=/var/lib/proton-broker \
+    LOGNAME=proton-broker \
+    PYTHONPATH=/app \
+    PROTON_BROKER_SOCKET=/run/proton-policy-router/proton.sock \
+    PROTON_LOADER_OVERRIDES=keyring=json \
+    USER=proton-broker \
+    XDG_CACHE_HOME=/var/lib/proton-broker/cache \
+    XDG_CONFIG_HOME=/var/lib/proton-broker/config \
+    XDG_RUNTIME_DIR=/run/proton-policy-router/proton-runtime
+
+ENTRYPOINT ["python3", "-m", "proton_broker.server"]

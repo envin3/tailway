@@ -1,0 +1,17 @@
+# Secrets and machine-specific runtime state - never commit
+.env
+run/
+state/
+tailscale-state/
+proton-configs/
+proton-broker-state/
+ui-auth/
+tls/
+docs/spikes/evidence/
+
+# Build artifacts
+/target/
+/gateway-agent
+/gateway-ui
+__pycache__/
+*.pyc
