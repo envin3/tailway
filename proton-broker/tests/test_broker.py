@@ -6,7 +6,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parents[1]))
 
 from proton_broker.adapter import sanitize_server
-from proton_broker.server import BrokerApplication
+from proton_broker.server import BrokerApplication, EventLoopRunner
 from proton_broker.provisioner import CatalogProvisioner
 
 
@@ -119,6 +119,52 @@ class BrokerApplicationTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(payload, {"serverId": "logical-1", "state": "added"})
         self.assertEqual(provisioner.server["id"], "logical-1")
+
+
+class SlowAdapter(FakeAdapter):
+    def __init__(self, delay):
+        super().__init__()
+        self.delay = delay
+        self.loops = []
+
+    async def account(self):
+        import asyncio
+
+        self.loops.append(asyncio.get_running_loop())
+        await asyncio.sleep(self.delay)
+        return {"state": "signedOut"}
+
+
+class EventLoopRunnerTests(unittest.TestCase):
+    def test_hung_proton_call_times_out(self):
+        application = BrokerApplication(SlowAdapter(5), runner=EventLoopRunner(timeout=0.2))
+        status, payload = application.dispatch("GET", "/v1/proton/account", {})
+        self.assertEqual(status, 504)
+        self.assertIn("timed out", payload["error"])
+
+    def test_health_does_not_wait_for_proton(self):
+        import threading
+        import time
+
+        application = BrokerApplication(SlowAdapter(1), runner=EventLoopRunner(timeout=5))
+        worker = threading.Thread(
+            target=application.dispatch, args=("GET", "/v1/proton/account", {})
+        )
+        worker.start()
+        time.sleep(0.1)
+        started = time.monotonic()
+        status, _ = application.dispatch("GET", "/healthz", {})
+        self.assertEqual(status, 200)
+        self.assertLess(time.monotonic() - started, 0.5)
+        worker.join()
+
+    def test_calls_share_one_event_loop(self):
+        adapter = SlowAdapter(0)
+        application = BrokerApplication(adapter)
+        application.dispatch("GET", "/v1/proton/account", {})
+        application.dispatch("GET", "/v1/proton/account", {})
+        self.assertEqual(len(adapter.loops), 2)
+        self.assertIs(adapter.loops[0], adapter.loops[1])
 
 
 class CatalogProvisionerTests(unittest.TestCase):

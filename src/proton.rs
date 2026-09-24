@@ -1,8 +1,9 @@
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use bytes::Bytes;
-use http_body_util::{BodyExt, Empty};
+use http_body_util::{BodyExt, Empty, Limited};
 use hyper::Request;
 use hyper::client::conn::http1;
 use hyper_util::rt::TokioIo;
@@ -10,6 +11,9 @@ use serde::Deserialize;
 use tokio::net::UnixStream;
 
 pub const RUNTIME_EXIT_LIMIT: usize = 255;
+/// The quota is read on status and mutation requests; a hung broker must not stall them.
+const ACCOUNT_TIMEOUT: Duration = Duration::from_secs(5);
+const ACCOUNT_BODY_LIMIT: usize = 64 * 1024;
 
 #[derive(Clone)]
 pub struct AccountLimits {
@@ -31,7 +35,9 @@ impl AccountLimits {
     }
 
     pub async fn exit_limit(&self) -> Result<Option<usize>> {
-        read_exit_limit(&self.socket_path).await
+        tokio::time::timeout(ACCOUNT_TIMEOUT, read_exit_limit(&self.socket_path))
+            .await
+            .context("Proton account broker timed out")?
     }
 }
 
@@ -56,7 +62,11 @@ async fn read_exit_limit(socket_path: &Path) -> Result<Option<usize>> {
     if !response.status().is_success() {
         bail!("Proton account broker returned {}", response.status());
     }
-    let body = response.into_body().collect().await?.to_bytes();
+    let body = Limited::new(response.into_body(), ACCOUNT_BODY_LIMIT)
+        .collect()
+        .await
+        .map_err(|error| anyhow::anyhow!("read Proton account metadata: {error}"))?
+        .to_bytes();
     let account: AccountResponse = serde_json::from_slice(&body)?;
     Ok((account.state == "authenticated")
         .then(|| {
@@ -108,5 +118,21 @@ mod tests {
         });
         assert_eq!(read_exit_limit(&socket_path).await.unwrap(), Some(11));
         server.await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn times_out_when_broker_hangs() {
+        let directory = tempfile::tempdir().unwrap();
+        let socket_path = directory.path().join("broker.sock");
+        let listener = UnixListener::bind(&socket_path).unwrap();
+        let _server = tokio::spawn(async move {
+            let (_stream, _) = listener.accept().await.unwrap();
+            std::future::pending::<()>().await;
+        });
+        let error = AccountLimits::new(&socket_path)
+            .exit_limit()
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("timed out"));
     }
 }

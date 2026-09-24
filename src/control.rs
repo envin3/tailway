@@ -82,12 +82,14 @@ async fn get_status(State(api): State<Arc<Api>>) -> Response {
         Err(error) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, error),
     };
     let (exits, last_error) = api.reconciler.snapshot().await;
+    let applied_revision = api.reconciler.applied_revision().await;
     let exit_limit = api.account_limits.exit_limit().await.ok().flatten();
     json_response(
         StatusCode::OK,
         json!({
             "schemaVersion": SCHEMA_VERSION,
             "revision": desired.revision,
+            "appliedRevision": applied_revision,
             "state": if last_error.is_empty() { "healthy" } else { "failed" },
             "lastError": last_error,
             "activeExits": exits.len(),

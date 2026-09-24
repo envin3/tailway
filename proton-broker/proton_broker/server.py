@@ -1,7 +1,9 @@
 import asyncio
+import concurrent.futures
 import json
 import os
 import socketserver
+import threading
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from typing import Any
@@ -11,20 +13,66 @@ from .adapter import ProtonCoreAdapter
 from .provisioner import CatalogProvisioner
 
 MAX_BODY_BYTES = 16 * 1024
+PROTON_CALL_TIMEOUT_SECONDS = float(os.environ.get("PROTON_CALL_TIMEOUT_SECONDS", "30"))
+
+
+class ProtonCallTimeout(Exception):
+    pass
+
+
+class EventLoopRunner:
+    """Runs every Proton coroutine on one long-lived loop.
+
+    Proton core keeps loop-bound resources (sessions, refreshers), so a fresh
+    asyncio.run() per request is unsafe. Calls are bounded by a timeout so a hung
+    Proton request cannot stall the broker indefinitely.
+    """
+
+    def __init__(self, timeout: float = PROTON_CALL_TIMEOUT_SECONDS) -> None:
+        self.timeout = timeout
+        self.loop = asyncio.new_event_loop()
+        self.thread = threading.Thread(
+            target=self.loop.run_forever, name="proton-event-loop", daemon=True
+        )
+        self.thread.start()
+
+    def run(self, awaitable: Any) -> Any:
+        future = asyncio.run_coroutine_threadsafe(_await(awaitable), self.loop)
+        try:
+            return future.result(timeout=self.timeout)
+        except concurrent.futures.TimeoutError as error:
+            future.cancel()
+            raise ProtonCallTimeout from error
+
+
+async def _await(awaitable: Any) -> Any:
+    return await awaitable
 
 
 class BrokerApplication:
-    def __init__(self, adapter: Any, provisioner: Any = None) -> None:
+    def __init__(
+        self, adapter: Any, provisioner: Any = None, runner: EventLoopRunner | None = None
+    ) -> None:
         self.adapter = adapter
         self.provisioner = provisioner
         self.pending_two_factor = False
+        self.runner = runner or EventLoopRunner()
+        # Requests are served on separate threads so /healthz never waits on
+        # Proton; account operations themselves are serialized.
+        self.lock = threading.Lock()
 
     def dispatch(
         self, method: str, path: str, body: dict[str, Any]
     ) -> tuple[int, dict[str, Any]]:
+        if method == "GET" and path == "/healthz":
+            return 200, {"status": "ok"}
+        with self.lock:
+            return self._dispatch_locked(method, path, body)
+
+    def _dispatch_locked(
+        self, method: str, path: str, body: dict[str, Any]
+    ) -> tuple[int, dict[str, Any]]:
         try:
-            if method == "GET" and path == "/healthz":
-                return 200, {"status": "ok"}
             if method == "GET" and path == "/v1/proton/account":
                 if self.pending_two_factor:
                     return 200, {"state": "twoFactorRequired"}
@@ -62,6 +110,8 @@ class BrokerApplication:
                 self.pending_two_factor = False
                 return 200, {"state": "signedOut"}
             return 404, {"error": "not found"}
+        except ProtonCallTimeout:
+            return 504, {"error": "Proton service timed out"}
         except PermissionError as error:
             return 401, {"error": str(error)}
         except ValueError as error:
@@ -69,9 +119,8 @@ class BrokerApplication:
         except Exception:
             return 502, {"error": "Proton service unavailable"}
 
-    @staticmethod
-    def _run(awaitable: Any) -> Any:
-        return asyncio.run(awaitable)
+    def _run(self, awaitable: Any) -> Any:
+        return self.runner.run(awaitable)
 
 
 def required_text(body: dict[str, Any], field: str, maximum: int) -> str:
@@ -88,7 +137,13 @@ class BrokerHandler(BaseHTTPRequestHandler):
         self._dispatch({})
 
     def do_POST(self) -> None:
-        content_length = int(self.headers.get("Content-Length", "0"))
+        try:
+            content_length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            content_length = -1
+        if content_length < 0:
+            self._respond(400, {"error": "invalid Content-Length"})
+            return
         if content_length > MAX_BODY_BYTES:
             self._respond(413, {"error": "request body too large"})
             return
@@ -121,7 +176,9 @@ class BrokerHandler(BaseHTTPRequestHandler):
         self.wfile.write(encoded)
 
 
-class BrokerServer(socketserver.UnixStreamServer):
+class BrokerServer(socketserver.ThreadingUnixStreamServer):
+    daemon_threads = True
+
     def __init__(self, socket_path: str, application: BrokerApplication) -> None:
         self.application = application
         super().__init__(socket_path, BrokerHandler)

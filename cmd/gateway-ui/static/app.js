@@ -12,6 +12,11 @@ const api = async (path, options = {}) => {
   if (options.method && options.method !== "GET") headers["X-CSRF-Token"] = state.csrfToken;
   const response = await fetch(path, { ...options, headers, cache: "no-store" });
   const payload = await response.json().catch(() => ({}));
+  if (response.status === 403 && payload.error === "invalid CSRF token" && !options.csrfRetried) {
+    // The session expired and a new one was issued; fetch its token and retry once.
+    state.csrfToken = (await api("/session")).csrfToken;
+    return api(path, { ...options, csrfRetried: true });
+  }
   if (!response.ok) throw new Error(payload.error || `Request failed (${response.status})`);
   return payload;
 };

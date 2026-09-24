@@ -39,13 +39,20 @@ pub struct Config {
 
 #[derive(Default)]
 struct Runtime {
-    exits: Vec<Exit>,
-    last_error: String,
     tunnels: HashMap<String, [u8; 32]>,
     slots: HashMap<String, u32>,
     created: HashMap<String, Instant>,
     applied_routes: BTreeMap<Ipv4Addr, String>,
     unknown_nodes: Vec<String>,
+    applied_revision: Option<u64>,
+}
+
+/// Last reconcile outcome, readable without waiting for a reconcile in progress.
+#[derive(Clone, Default)]
+struct Published {
+    exits: Vec<Exit>,
+    last_error: String,
+    applied_revision: Option<u64>,
 }
 
 pub struct Reconciler {
@@ -55,6 +62,7 @@ pub struct Reconciler {
     devices: Arc<Provider>,
     runner: Runner,
     runtime: Mutex<Runtime>,
+    published: std::sync::Mutex<Published>,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -79,6 +87,7 @@ impl Reconciler {
             devices,
             runner,
             runtime: Mutex::new(Runtime::default()),
+            published: std::sync::Mutex::new(Published::default()),
         }
     }
 
@@ -102,23 +111,43 @@ impl Reconciler {
         self.apply_ruleset(&compiled.ruleset).await
     }
 
+    fn published(&self) -> std::sync::MutexGuard<'_, Published> {
+        self.published
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Revision of the desired state that is currently enforced in the kernel.
+    pub async fn applied_revision(&self) -> Option<u64> {
+        self.published().applied_revision
+    }
+
     pub async fn snapshot(&self) -> (Vec<Exit>, String) {
-        let runtime = self.runtime.lock().await;
-        (runtime.exits.clone(), runtime.last_error.clone())
+        let published = self.published();
+        (published.exits.clone(), published.last_error.clone())
     }
 
     pub async fn reconcile(&self) -> Result<()> {
         match self.reconcile_inner().await {
             Ok(()) => Ok(()),
             Err(error) => {
-                self.runtime.lock().await.last_error = error.to_string();
+                self.published().last_error = error.to_string();
                 Err(error)
             }
         }
     }
 
     async fn reconcile_inner(&self) -> Result<()> {
+        // Everything is read under the lock: a reconcile that read its inputs before
+        // waiting could otherwise apply an older revision after a newer one.
+        let mut runtime = self.runtime.lock().await;
         let mut desired = self.store.load()?;
+        let revision = desired.revision;
+        if let Some(applied) = runtime.applied_revision
+            && revision < applied
+        {
+            bail!("desired state revision {revision} is older than applied revision {applied}");
+        }
         let devices = match self.devices.devices().await {
             Ok(devices) => devices,
             Err(_) if self.config.dry_run => Vec::new(),
@@ -127,7 +156,6 @@ impl Reconciler {
         desired.exits.sort_by(|left, right| left.id.cmp(&right.id));
         let desired_ids: HashSet<_> = desired.exits.iter().map(|exit| exit.id.clone()).collect();
 
-        let mut runtime = self.runtime.lock().await;
         self.remove_stale_tunnels(&mut runtime, &desired_ids).await;
         let mut runtime_exits = Vec::with_capacity(desired.exits.len());
         for mut wanted in desired.exits {
@@ -177,8 +205,12 @@ impl Reconciler {
         self.reset_moved_connections(&runtime.applied_routes, &compiled.routes)
             .await;
         runtime.applied_routes = compiled.routes;
-        runtime.exits = runtime_exits;
-        runtime.last_error.clear();
+        runtime.applied_revision = Some(revision);
+        *self.published() = Published {
+            exits: runtime_exits,
+            last_error: String::new(),
+            applied_revision: Some(revision),
+        };
         Ok(())
     }
 
@@ -537,6 +569,59 @@ mod tests {
             );
         }
         assert!(allocate_slot(&mut runtime, "exit-overflow").is_err());
+    }
+
+    fn dry_run_reconciler(directory: &std::path::Path) -> (Arc<Store>, Arc<Reconciler>) {
+        let store = Arc::new(Store::new(directory.join("state/desired.json")));
+        let reconciler = Arc::new(Reconciler::new(
+            Config {
+                wan_interface: "eth0".into(),
+                tailscale_interface: "tailscale0".into(),
+                runtime_directory: directory.join("run"),
+                dry_run: true,
+                unassigned: UnassignedPolicy::Block,
+            },
+            store.clone(),
+            Arc::new(StaticCatalog::new(
+                directory.join("catalog.json"),
+                directory.join("secrets"),
+            )),
+            Arc::new(Provider::new(Runner::new(true))),
+            Runner::new(true),
+        ));
+        (store, reconciler)
+    }
+
+    #[tokio::test]
+    async fn concurrent_reconciles_end_on_the_latest_revision() {
+        let directory = tempfile::tempdir().unwrap();
+        let (store, reconciler) = dry_run_reconciler(directory.path());
+        for revision in 0..20 {
+            store.update(revision, |_| Ok(())).unwrap();
+            let first = tokio::spawn({
+                let reconciler = reconciler.clone();
+                async move { reconciler.reconcile().await }
+            });
+            let second = tokio::spawn({
+                let reconciler = reconciler.clone();
+                async move { reconciler.reconcile().await }
+            });
+            first.await.unwrap().unwrap();
+            second.await.unwrap().unwrap();
+            assert_eq!(reconciler.applied_revision().await, Some(revision + 1));
+        }
+    }
+
+    #[tokio::test]
+    async fn refuses_to_apply_an_older_revision() {
+        let directory = tempfile::tempdir().unwrap();
+        let (store, reconciler) = dry_run_reconciler(directory.path());
+        store.update(0, |_| Ok(())).unwrap();
+        reconciler.runtime.lock().await.applied_revision = Some(5);
+        let error = reconciler.reconcile().await.unwrap_err();
+        assert!(error.to_string().contains("older than applied revision 5"));
+        assert_eq!(reconciler.runtime.lock().await.applied_revision, Some(5));
+        assert_eq!(reconciler.snapshot().await.1, error.to_string());
     }
 
     #[test]

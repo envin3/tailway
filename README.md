@@ -51,7 +51,7 @@ Do not put private keys in the catalog, Compose file, `.env`, this repository, o
 
 ## Configure console security
 
-Generate the bcrypt password hash and CSRF secret:
+Generate the bcrypt password hash:
 
 ```sh
 ./scripts/create-ui-secrets.sh
@@ -66,7 +66,7 @@ tls/tls.key
 
 Assign both TLS files to `CONTROL_GID` with mode `0640`. The UI child runs as UID `65532` with this group and does not rely on container root to bypass host file modes.
 
-The console refuses to start without TLS, a bcrypt hash, and a 32-byte-or-longer CSRF token. Publish port `8443` only on a trusted LAN or tailnet address and never forward it from the Internet.
+The console refuses to start without TLS and a bcrypt hash. Publish port `8443` only on a trusted LAN or tailnet address and never forward it from the Internet.
 
 ## Build and enroll
 
@@ -89,6 +89,8 @@ docker compose top gateway-agent
 ```
 
 Open `https://<HOST_BIND_IP>:8443` and authenticate as `admin` with the password used by the secret generator.
+
+The browser's password prompt (HTTP Basic) is only the login step. A successful login issues an `HttpOnly`, `Secure`, `SameSite=Strict` session cookie that expires after 30 minutes idle or 12 hours, so bcrypt runs once per session rather than on every request. Each session has its own CSRF token, fetched from `/session`; changes require both the session cookie and that token, so cached Basic credentials alone cannot change routing. Ten wrong passwords from one client address within five minutes block further password attempts from that address for the rest of the window; requests without credentials do not count, and existing sessions keep working. Behind a reverse proxy such as `tailscale serve`, every client shares the proxy's address for this limit. Requests to the agent and broker time out after 30 seconds.
 
 ## Proton account discovery
 

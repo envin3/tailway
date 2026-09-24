@@ -33,7 +33,6 @@ services:
       CATALOG_PATH: /etc/tailscale-exit-policy-router/catalog.json
       CONTROL_GID: ${CONTROL_GID:-1000}
       CONTROL_SOCKET: /run/tailscale-exit-policy-router/control.sock
-      CSRF_TOKEN_FILE: /run/secrets/ui/csrf.token
       LISTEN_ADDRESS: :8443
       PASSWORD_HASH_FILE: /run/secrets/ui/password.bcrypt
       RECONCILE_INTERVAL: 30s
