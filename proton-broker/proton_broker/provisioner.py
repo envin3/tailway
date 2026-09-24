@@ -11,6 +11,14 @@ class CatalogProvisioner:
         self.catalog_path = Path(catalog_path)
         self.configs_path = Path(configs_path)
 
+    def server_ids(self) -> list[str]:
+        """IDs of every server already imported into the agent catalog."""
+        try:
+            catalog = json.loads(self.catalog_path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return []
+        return [server["id"] for server in catalog.get("servers", []) if server.get("id")]
+
     def add(self, server: dict[str, Any]) -> None:
         filename = f"live-{hashlib.sha256(server['id'].encode()).hexdigest()[:24]}.conf"
         self.configs_path.mkdir(mode=0o2770, parents=True, exist_ok=True)

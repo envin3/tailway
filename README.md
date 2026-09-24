@@ -100,6 +100,10 @@ This integration uses Proton's official open-source Linux client internals pinne
 
 Live account discovery groups servers by country, shows 12 countries per page, and renders at most 25 servers at a time inside the expanded country. Secure Core, P2P, and Streaming filters can be combined to require every selected feature. Select **Add** to generate a WireGuard profile from the authenticated Proton session and register that server in the routing catalog. Select **Update** later to refresh its endpoint and key material. Generated profiles remain in `proton-configs/` with mode `0640` and are never returned to the browser or routing API.
 
+Generated profiles use the signed-in session's WireGuard key, which Proton authorises through a session certificate valid for about seven days. **With an expired certificate, Proton servers still complete WireGuard handshakes but stop forwarding data**, so tunnels look healthy while every request times out. The broker therefore starts Proton's own background refresher (the same one the official Linux client uses) when it starts with a saved session and after every sign-in; it renews the certificate before it expires and keeps the server list current. The **Proton account** page shows how long the certificate remains valid and whether renewal is running. A new sign-in can issue a new key, so every imported server's profile is regenerated automatically after sign-in.
+
+The official client also opens a TLS session to each server's local agent (`10.2.0.1:65432`) through the tunnel to read connection state (for example *jailed* when a certificate has expired) and to set features such as NetShield and the exit IP. Traffic flows without it, so this router does not use it yet.
+
 ## Console workflow
 
 1. Open **Nodes** to see every routable Tailscale peer known to the gateway, including offline peers. The gateway node itself is excluded because it cannot route through itself.

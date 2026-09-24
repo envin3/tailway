@@ -11,11 +11,17 @@ from proton_broker.provisioner import CatalogProvisioner
 
 
 class FakeProvisioner:
-    def __init__(self):
+    def __init__(self, server_ids=()):
         self.server = None
+        self.added = []
+        self.ids = list(server_ids)
+
+    def server_ids(self):
+        return list(self.ids)
 
     def add(self, server):
         self.server = server
+        self.added.append(server["id"])
 
 
 class FakeAdapter:
@@ -23,6 +29,16 @@ class FakeAdapter:
         self.logged_in = False
         self.two_factor_required = False
         self.login_call = None
+        self.refresh_enabled = False
+        self.refresh_error = None
+
+    async def enable_refresh(self):
+        if self.refresh_error:
+            raise self.refresh_error
+        if not self.logged_in:
+            return False
+        self.refresh_enabled = True
+        return True
 
     async def login(self, username, password):
         self.login_call = (username, password)
@@ -119,6 +135,41 @@ class BrokerApplicationTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(payload, {"serverId": "logical-1", "state": "added"})
         self.assertEqual(provisioner.server["id"], "logical-1")
+
+
+class BackgroundRefreshTests(unittest.TestCase):
+    def sign_in(self, application, adapter):
+        application.dispatch("POST", "/v1/proton/login", {"username": "u", "password": "p"})
+        return application.dispatch("POST", "/v1/proton/totp", {"code": "123456"})
+
+    def test_sign_in_starts_refresh_and_regenerates_imported_configs(self):
+        adapter = FakeAdapter()
+        provisioner = FakeProvisioner(["logical-1", "logical-2"])
+        application = BrokerApplication(adapter, provisioner)
+        status, payload = self.sign_in(application, adapter)
+        self.assertEqual(status, 200)
+        self.assertTrue(adapter.refresh_enabled)
+        self.assertEqual(provisioner.added, ["logical-1", "logical-2"])
+        self.assertEqual(payload["configurationsRefreshed"], 2)
+        self.assertEqual(payload["configurationsFailed"], [])
+
+    def test_account_poll_starts_refresh_for_a_saved_session(self):
+        adapter = FakeAdapter()
+        adapter.logged_in = True
+        application = BrokerApplication(adapter)
+        status, _ = application.dispatch("GET", "/v1/proton/account", {})
+        self.assertEqual(status, 200)
+        self.assertTrue(adapter.refresh_enabled)
+
+    def test_refresh_failure_does_not_break_account_status(self):
+        adapter = FakeAdapter()
+        adapter.logged_in = True
+        adapter.refresh_error = RuntimeError("API unreachable")
+        application = BrokerApplication(adapter)
+        status, payload = application.dispatch("GET", "/v1/proton/account", {})
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["state"], "authenticated")
+        self.assertFalse(adapter.refresh_enabled)
 
 
 class SlowAdapter(FakeAdapter):

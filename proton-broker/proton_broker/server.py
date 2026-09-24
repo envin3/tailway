@@ -1,6 +1,7 @@
 import asyncio
 import concurrent.futures
 import json
+import logging
 import os
 import socketserver
 import threading
@@ -11,6 +12,8 @@ from urllib.parse import unquote
 
 from .adapter import ProtonCoreAdapter
 from .provisioner import CatalogProvisioner
+
+logger = logging.getLogger("proton_broker")
 
 MAX_BODY_BYTES = 16 * 1024
 PROTON_CALL_TIMEOUT_SECONDS = float(os.environ.get("PROTON_CALL_TIMEOUT_SECONDS", "30"))
@@ -76,6 +79,9 @@ class BrokerApplication:
             if method == "GET" and path == "/v1/proton/account":
                 if self.pending_two_factor:
                     return 200, {"state": "twoFactorRequired"}
+                # Also retries starting the refresher if it failed earlier, for
+                # example because Proton's API was unreachable at startup.
+                self.ensure_background_refresh()
                 return 200, self._run(self.adapter.account())
             if method == "GET" and path == "/v1/proton/servers":
                 return 200, {"servers": self._run(self.adapter.servers())}
@@ -95,7 +101,7 @@ class BrokerApplication:
                 if result.get("state") == "failed":
                     return 401, {"error": "Proton authentication failed"}
                 self.pending_two_factor = result.get("state") == "twoFactorRequired"
-                return 200, result
+                return 200, self._after_authentication(result)
             if method == "POST" and path == "/v1/proton/totp":
                 code = required_text(body, "code", 16)
                 if not code.isdigit() or len(code) not in (6, 8):
@@ -104,7 +110,7 @@ class BrokerApplication:
                 if result.get("state") == "failed":
                     return 401, {"error": "Proton two-factor authentication failed"}
                 self.pending_two_factor = result.get("state") == "twoFactorRequired"
-                return 200, result
+                return 200, self._after_authentication(result)
             if method == "POST" and path == "/v1/proton/logout":
                 self._run(self.adapter.logout())
                 self.pending_two_factor = False
@@ -121,6 +127,33 @@ class BrokerApplication:
 
     def _run(self, awaitable: Any) -> Any:
         return self.runner.run(awaitable)
+
+    def ensure_background_refresh(self) -> bool:
+        """Best effort: a failure here must not break the calling request."""
+        try:
+            return bool(self._run(self.adapter.enable_refresh()))
+        except Exception:  # pylint: disable=broad-except
+            logger.warning("could not start Proton background refresh", exc_info=True)
+            return False
+
+    def _after_authentication(self, result: dict[str, Any]) -> dict[str, Any]:
+        """A new sign-in can issue a new WireGuard key, which makes every
+        previously imported configuration useless. Start the certificate
+        refresher and regenerate the imported configurations."""
+        if result.get("state") != "authenticated":
+            return result
+        self.ensure_background_refresh()
+        if self.provisioner is None:
+            return result
+        refreshed, failed = 0, []
+        for server_id in self.provisioner.server_ids():
+            try:
+                self.provisioner.add(self._run(self.adapter.provision(server_id)))
+                refreshed += 1
+            except Exception:  # pylint: disable=broad-except
+                failed.append(server_id)
+                logger.warning("could not regenerate configuration for %s", server_id, exc_info=True)
+        return {**result, "configurationsRefreshed": refreshed, "configurationsFailed": failed}
 
 
 def required_text(body: dict[str, Any], field: str, maximum: int) -> str:
@@ -185,6 +218,7 @@ class BrokerServer(socketserver.ThreadingUnixStreamServer):
 
 
 def main() -> None:
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     os.umask(0o077)
     socket_path = Path(
         os.environ.get(
@@ -202,9 +236,10 @@ def main() -> None:
         os.environ.get("PROTON_CATALOG_PATH", "/etc/tailscale-exit-policy-router/catalog.json"),
         os.environ.get("PROTON_CONFIGS_PATH", "/run/secrets/proton"),
     )
-    with BrokerServer(
-        str(socket_path), BrokerApplication(ProtonCoreAdapter(), provisioner)
-    ) as server:
+    application = BrokerApplication(ProtonCoreAdapter(), provisioner)
+    if application.ensure_background_refresh():
+        logger.info("Proton background refresh started for the saved session")
+    with BrokerServer(str(socket_path), application) as server:
         socket_path.chmod(0o660)
         server.serve_forever()
 

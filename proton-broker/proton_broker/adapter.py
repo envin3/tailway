@@ -1,6 +1,6 @@
 import importlib.metadata
 import secrets
-from typing import Any
+from typing import Any, Optional
 
 
 FEATURE_NAMES = {
@@ -39,6 +39,7 @@ class ProtonCoreAdapter:
         self._api = ProtonVPNAPI(
             ClientTypeMetadata(type="cli"), registry=Registry()
         )
+        self._refresh_enabled = False
 
     @property
     def core_version(self) -> str:
@@ -54,6 +55,30 @@ class ProtonCoreAdapter:
 
     async def logout(self) -> None:
         await self._api.logout()
+        self._refresh_enabled = False
+
+    async def enable_refresh(self) -> bool:
+        """Starts Proton's own background refresher, as the official client does.
+
+        Session certificates are valid for about seven days. Proton servers keep
+        completing WireGuard handshakes with an expired certificate but stop
+        forwarding data, so the certificate must be renewed continuously. The
+        refresher also keeps the server list and client configuration current.
+        """
+        if not self._api.is_user_logged_in():
+            return False
+        if not self._refresh_enabled:
+            await self._api.refresher.enable()
+            self._refresh_enabled = True
+        return True
+
+    def _certificate_remaining_seconds(self) -> Optional[int]:
+        try:
+            credentials = self._api.account_data.vpn_credentials.pubkey_credentials
+            remaining = credentials.certificate_validity_remaining
+        except Exception:  # pylint: disable=broad-except
+            return None
+        return None if remaining is None else int(remaining)
 
     async def account(self) -> dict[str, Any]:
         if not self._api.is_user_logged_in():
@@ -69,6 +94,8 @@ class ProtonCoreAdapter:
             "tier": self._api.user_tier,
             "maxConnections": account.max_connections,
             "coreVersion": self.core_version,
+            "certificateValidSeconds": self._certificate_remaining_seconds(),
+            "backgroundRefresh": self._refresh_enabled,
         }
 
     async def servers(self) -> list[dict[str, Any]]:
@@ -86,8 +113,11 @@ class ProtonCoreAdapter:
     async def provision(self, server_id: str) -> dict[str, Any]:
         if not self._api.is_user_logged_in():
             raise PermissionError("Proton account login required")
+        server_list = self._api.server_list
+        if server_list is None or server_list.expired:
+            server_list = await self._api.refresher.get_up_to_date_server_list()
         logical = next(
-            (server for server in self._api.server_list.logicals if server.id == server_id),
+            (server for server in server_list.logicals if server.id == server_id),
             None,
         )
         if logical is None:

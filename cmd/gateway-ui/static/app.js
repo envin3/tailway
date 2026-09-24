@@ -150,6 +150,13 @@ const renderAccount = () => {
   document.querySelector("#proton-plan").textContent = state.protonAccount.plan;
   document.querySelector("#proton-connections").textContent = state.protonAccount.maxConnections;
   document.querySelector("#proton-core-version").textContent = state.protonAccount.coreVersion;
+  const certificate = document.querySelector("#proton-certificate");
+  const seconds = state.protonAccount.certificateValidSeconds;
+  const refresh = state.protonAccount.backgroundRefresh ? "auto-renewing" : "NOT auto-renewing";
+  if (seconds === null || seconds === undefined) certificate.textContent = `Unknown · ${refresh}`;
+  else if (seconds <= 0) certificate.textContent = `Expired — tunnels will not pass traffic · ${refresh}`;
+  else certificate.textContent = `Valid for ${Math.floor(seconds / 86400)}d ${Math.floor(seconds % 86400 / 3600)}h · ${refresh}`;
+  certificate.className = seconds > 0 && state.protonAccount.backgroundRefresh ? "" : "warn-text";
 };
 
 const renderExits = () => {
