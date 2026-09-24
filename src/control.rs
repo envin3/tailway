@@ -11,8 +11,9 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::catalog::StaticCatalog;
+use crate::dns;
 use crate::domain::{
-    Assignment, DesiredState, Exit, ExitStatus, SCHEMA_VERSION, Server, is_builtin_route,
+    Assignment, DesiredState, Exit, ExitStatus, NodeDns, SCHEMA_VERSION, Server, is_builtin_route,
 };
 use crate::proton::AccountLimits;
 use crate::reconcile::Reconciler;
@@ -37,6 +38,27 @@ struct MutationRequest {
     display_name: String,
     #[serde(default)]
     exit_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct DnsRequest {
+    revision: u64,
+    /// Omitted: unchanged. `null`: back to the default.
+    #[serde(default, deserialize_with = "optional_field")]
+    kill_switch: Option<Option<bool>>,
+    /// Omitted: unchanged. `null` or `""`: back to the default.
+    #[serde(default, deserialize_with = "optional_field")]
+    server: Option<Option<String>>,
+}
+
+/// Distinguishes an omitted field (`None`) from an explicit `null` (`Some(None)`).
+fn optional_field<'de, T, D>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    T: Deserialize<'de>,
+    D: serde::Deserializer<'de>,
+{
+    Option::<T>::deserialize(deserializer).map(Some)
 }
 
 impl Api {
@@ -71,6 +93,7 @@ impl Api {
                 "/v1/routes/{node_id}",
                 put(route_device).delete(disable_route),
             )
+            .route("/v1/dns/{node_id}", put(set_dns).delete(reset_dns))
             .with_state(self)
             .layer(axum::extract::DefaultBodyLimit::max(1 << 20))
     }
@@ -96,6 +119,15 @@ async fn get_status(State(api): State<Arc<Api>>) -> Response {
             "exitLimit": exit_limit,
             "dryRun": api.reconciler.dry_run(),
             "unassignedPolicy": api.reconciler.unassigned_policy().as_str(),
+            "dns": api.reconciler.dns().map(|resolver| {
+                let defaults = resolver.defaults();
+                json!({
+                    "enabled": true,
+                    "defaultServer": defaults.server.to_string(),
+                    "killSwitchDefault": defaults.kill_switch,
+                    "protonResolver": dns::PROTON_RESOLVER.to_string(),
+                })
+            }).unwrap_or_else(|| json!({"enabled": false})),
         }),
     )
 }
@@ -109,18 +141,29 @@ async fn get_devices(State(api): State<Arc<Api>>) -> Response {
         Ok(desired) => desired,
         Err(error) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, error),
     };
+    let dns_settings: HashMap<_, _> = desired
+        .dns
+        .iter()
+        .map(|setting| (setting.node_id.clone(), setting.clone()))
+        .collect();
     let mut assignments: HashMap<_, _> = desired
         .assignments
         .into_iter()
         .map(|assignment| (assignment.node_id, assignment.exit_id))
         .collect();
+    let resolver = api.reconciler.dns();
     let mut result: Vec<_> = devices
         .into_iter()
         .map(|device| {
             let exit_id = assignments.remove(&device.node_id).unwrap_or_default();
+            let dns = resolver
+                .map(|resolver| device_dns(resolver, &device, dns_settings.get(&device.node_id)));
             let mut value = serde_json::to_value(device).expect("serialize device");
             if !exit_id.is_empty() {
                 value["exitId"] = json!(exit_id);
+            }
+            if let Some(dns) = dns {
+                value["dns"] = dns;
             }
             value
         })
@@ -345,6 +388,110 @@ async fn disable_route(
         Ok(())
     });
     finish_mutation(api, result).await
+}
+
+fn device_dns(
+    resolver: &dns::Resolver,
+    device: &crate::domain::Device,
+    setting: Option<&NodeDns>,
+) -> Value {
+    let defaults = resolver.defaults();
+    let (server, kill_switch) = dns::effective(setting, defaults);
+    let resolution = device.addresses.iter().find_map(|address| match address {
+        std::net::IpAddr::V4(address) => Some(resolver.resolve(*address)),
+        std::net::IpAddr::V6(_) => None,
+    });
+    json!({
+        "resolution": resolution.as_ref().map_or("server", dns::Resolution::kind),
+        "server": server.to_string(),
+        "killSwitch": kill_switch,
+        "customServer": setting.and_then(|setting| setting.server).map(|server| server.to_string()),
+        "customKillSwitch": setting.and_then(|setting| setting.kill_switch),
+        "defaultServer": defaults.server.to_string(),
+    })
+}
+
+async fn set_dns(
+    State(api): State<Arc<Api>>,
+    Path(node_id): Path<String>,
+    Json(input): Json<DnsRequest>,
+) -> Response {
+    let server = match input.server {
+        None => None,
+        Some(value) => match parse_dns_server(value.as_deref().unwrap_or("")) {
+            Ok(server) => Some(server),
+            Err(error) => return error_response(StatusCode::BAD_REQUEST, error),
+        },
+    };
+    let result = api.store.update(input.revision, |desired| {
+        set_node_dns(desired, &node_id, input.kill_switch, server);
+        Ok(())
+    });
+    finish_mutation(api, result).await
+}
+
+async fn reset_dns(
+    State(api): State<Arc<Api>>,
+    Path(node_id): Path<String>,
+    Json(input): Json<MutationRequest>,
+) -> Response {
+    let result = api.store.update(input.revision, |desired| {
+        desired.dns.retain(|setting| setting.node_id != node_id);
+        Ok(())
+    });
+    finish_mutation(api, result).await
+}
+
+/// Empty means "use the default". Otherwise a unicast IPv4 resolver address.
+fn parse_dns_server(value: &str) -> anyhow::Result<Option<std::net::Ipv4Addr>> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    let server: std::net::Ipv4Addr = value
+        .parse()
+        .map_err(|_| anyhow::anyhow!("DNS server must be an IPv4 address"))?;
+    if server.is_unspecified()
+        || server.is_loopback()
+        || server.is_multicast()
+        || server.is_broadcast()
+        || dns::is_tailnet(std::net::IpAddr::V4(server))
+    {
+        anyhow::bail!("DNS server {server} is not a usable resolver address");
+    }
+    Ok(Some(server))
+}
+
+fn set_node_dns(
+    desired: &mut DesiredState,
+    node_id: &str,
+    kill_switch: Option<Option<bool>>,
+    server: Option<Option<std::net::Ipv4Addr>>,
+) {
+    let index = match desired
+        .dns
+        .iter()
+        .position(|setting| setting.node_id == node_id)
+    {
+        Some(index) => index,
+        None => {
+            desired.dns.push(NodeDns {
+                node_id: node_id.into(),
+                ..NodeDns::default()
+            });
+            desired.dns.len() - 1
+        }
+    };
+    let setting = &mut desired.dns[index];
+    if let Some(kill_switch) = kill_switch {
+        setting.kill_switch = kill_switch;
+    }
+    if let Some(server) = server {
+        setting.server = server;
+    }
+    if setting.kill_switch.is_none() && setting.server.is_none() {
+        desired.dns.remove(index);
+    }
 }
 
 fn route_node_to_server(
@@ -581,6 +728,38 @@ mod tests {
             assert_eq!(desired.exits.len(), 1);
             assert_eq!(desired.exits[0].id, "exit-ch");
             assert_eq!(desired.assignments[0].exit_id, "exit-ch");
+        }
+    }
+
+    #[test]
+    fn node_dns_settings_update_and_clear() {
+        let mut desired = DesiredState::default();
+        let router = std::net::Ipv4Addr::new(192, 168, 0, 1);
+        set_node_dns(&mut desired, "node-a", Some(Some(false)), None);
+        set_node_dns(&mut desired, "node-a", None, Some(Some(router)));
+        assert_eq!(desired.dns.len(), 1);
+        assert_eq!(desired.dns[0].kill_switch, Some(false));
+        assert_eq!(desired.dns[0].server, Some(router));
+        set_node_dns(&mut desired, "node-a", Some(None), Some(None));
+        assert!(desired.dns.is_empty(), "all defaults removes the entry");
+    }
+
+    #[test]
+    fn validates_dns_servers() {
+        assert_eq!(parse_dns_server("").unwrap(), None);
+        assert_eq!(
+            parse_dns_server(" 192.168.0.1 ").unwrap(),
+            Some(std::net::Ipv4Addr::new(192, 168, 0, 1))
+        );
+        for bad in [
+            "dns.example",
+            "::1",
+            "127.0.0.1",
+            "0.0.0.0",
+            "224.0.0.1",
+            "100.76.60.35",
+        ] {
+            assert!(parse_dns_server(bad).is_err(), "{bad} accepted");
         }
     }
 

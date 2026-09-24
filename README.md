@@ -122,6 +122,30 @@ Exit health comes from WireGuard handshakes, checked on every reconcile. A tunne
 
 Direct mode inherits the Docker host's egress path. To guarantee that **Direct Internet** means no VPN, disable any host-level VPN or its autoconnect setting; otherwise direct traffic will follow that host VPN even though it does not use a router-managed Proton tunnel.
 
+## DNS
+
+By default Tailscale resolves an exit node client's lookups on the exit node itself: the gateway's own `tailscaled` answers them through the gateway's normal connection, so a VPN-routed device leaks every hostname it looks up to the home ISP. The router cannot see which device asked, because those lookups are not forwarded packets.
+
+The agent therefore includes a per-device DNS forwarder. Point the tailnet at it in the Tailscale admin console under **DNS**:
+
+1. Add the gateway's tailnet IPv4 address as a nameserver, then your home router (or another resolver) as a second one, and enable **Override DNS servers**.
+2. Keep **Allow local network access** off on devices that use this exit node.
+
+MagicDNS keeps working: each device still answers tailnet names itself and forwards only other names. The forwarder sees which device asked and resolves accordingly:
+
+| Device | DNS |
+|---|---|
+| Routed to a Proton exit | `10.2.0.1` through that device's own tunnel, answered by its own Proton server |
+| Proton exit down, kill switch on (default) | `SERVFAIL`; nothing resolves |
+| Proton exit down, kill switch off | the device's DNS server over the gateway's own connection |
+| Direct, Local only, unassigned, or not using this exit node | the device's DNS server, default `DNS_DEFAULT_SERVER` (`9.9.9.9`) |
+
+Set the kill switch and DNS server per device in the **DNS** column of **Nodes**. `DNS_KILL_SWITCH_DEFAULT` sets the default kill switch; `DNS_FORWARDER=false` disables the forwarder.
+
+The nftables table redirects TCP and UDP port 53 addressed to the gateway itself on `tailscale0` to the forwarder on port 5353, so the agent needs no extra capability; DNS forwarded to other resolvers is routed like any other traffic. Only tailnet addresses (`100.64.0.0/10`) are answered.
+
+If the gateway is down, Tailscale uses the second nameserver. Devices using this exit node cannot reach it, because their traffic still goes to the unavailable exit node, so they get no DNS at all; other devices keep resolving. Tailscale may occasionally use the second nameserver even while the gateway is up.
+
 ## Development
 
 ```sh

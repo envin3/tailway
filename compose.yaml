@@ -46,6 +46,9 @@ services:
       TLS_CERT_FILE: /run/secrets/tls/tls.crt
       TLS_KEY_FILE: /run/secrets/tls/tls.key
       UNASSIGNED_POLICY: ${UNASSIGNED_POLICY:-block}
+      DNS_FORWARDER: ${DNS_FORWARDER:-true}
+      DNS_DEFAULT_SERVER: ${DNS_DEFAULT_SERVER:-9.9.9.9}
+      DNS_KILL_SWITCH_DEFAULT: ${DNS_KILL_SWITCH_DEFAULT:-true}
       WAN_INTERFACE: eth0
     volumes:
       - ./config:/etc/tailscale-exit-policy-router:ro

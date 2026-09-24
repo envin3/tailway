@@ -8,10 +8,11 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use tailscale_exit_policy_router::catalog::StaticCatalog;
 use tailscale_exit_policy_router::control::Api;
+use tailscale_exit_policy_router::dns::{self, DnsServer};
 use tailscale_exit_policy_router::domain::UnassignedPolicy;
 use tailscale_exit_policy_router::platform::Runner;
 use tailscale_exit_policy_router::proton::AccountLimits;
-use tailscale_exit_policy_router::reconcile::{Config, Reconciler};
+use tailscale_exit_policy_router::reconcile::{Config, DnsConfig, Reconciler};
 use tailscale_exit_policy_router::state::Store;
 use tailscale_exit_policy_router::tailscale::Provider;
 use tokio::net::UnixListener;
@@ -23,6 +24,7 @@ async fn main() -> Result<()> {
     tracing_subscriber::fmt().with_target(false).init();
     let dry_run = environment("DRY_RUN", "false").parse().unwrap_or(false);
     let unassigned: UnassignedPolicy = environment("UNASSIGNED_POLICY", "block").parse()?;
+    let dns_config = dns_config()?;
     let runner = Runner::new(dry_run);
     let store = Arc::new(Store::new(environment(
         "STATE_PATH",
@@ -46,6 +48,7 @@ async fn main() -> Result<()> {
             )),
             dry_run,
             unassigned,
+            dns: dns_config,
         },
         store.clone(),
         catalog.clone(),
@@ -57,6 +60,17 @@ async fn main() -> Result<()> {
         .install_baseline()
         .await
         .context("install fail-closed baseline")?;
+    if let (Some(dns_config), Some(resolver)) = (dns_config, reconciler.dns()) {
+        let server =
+            DnsServer::bind((std::net::Ipv4Addr::UNSPECIFIED, dns_config.port).into()).await?;
+        info!(
+            port = dns_config.port,
+            default_server = %dns_config.defaults.server,
+            kill_switch_default = dns_config.defaults.kill_switch,
+            "DNS forwarder ready"
+        );
+        tokio::spawn(server.run(resolver.clone(), dns::is_tailnet));
+    }
     let mut tailscaled = if !dry_run && environment("START_TAILSCALED", "true") == "true" {
         Some(start_tailscaled().await?)
     } else {
@@ -172,6 +186,28 @@ async fn shutdown_signal() {
         _ = interrupt => {},
         _ = terminate => {},
     }
+}
+
+fn dns_config() -> Result<Option<DnsConfig>> {
+    if !environment("DNS_FORWARDER", "true")
+        .parse::<bool>()
+        .context("parse DNS_FORWARDER")?
+    {
+        return Ok(None);
+    }
+    Ok(Some(DnsConfig {
+        defaults: dns::Defaults {
+            server: environment("DNS_DEFAULT_SERVER", "9.9.9.9")
+                .parse()
+                .context("parse DNS_DEFAULT_SERVER as an IPv4 address")?,
+            kill_switch: environment("DNS_KILL_SWITCH_DEFAULT", "true")
+                .parse()
+                .context("parse DNS_KILL_SWITCH_DEFAULT")?,
+        },
+        port: environment("DNS_LISTEN_PORT", "5353")
+            .parse()
+            .context("parse DNS_LISTEN_PORT")?,
+    }))
 }
 
 fn parse_interval(value: &str) -> Duration {

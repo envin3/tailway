@@ -1,4 +1,4 @@
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr};
 
 use serde::{Deserialize, Serialize};
 
@@ -93,6 +93,20 @@ pub struct Assignment {
     pub exit_id: String,
 }
 
+/// Per-node DNS overrides; unset fields use the gateway defaults.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NodeDns {
+    pub node_id: String,
+    /// Whether a Proton-routed node loses DNS when its tunnel is down.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kill_switch: Option<bool>,
+    /// DNS server for nodes not on a Proton exit, and the fallback when the
+    /// kill switch is off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server: Option<Ipv4Addr>,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Server {
@@ -116,6 +130,8 @@ pub struct DesiredState {
     pub revision: u64,
     pub exits: Vec<Exit>,
     pub assignments: Vec<Assignment>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dns: Vec<NodeDns>,
 }
 
 impl Default for DesiredState {
@@ -125,6 +141,7 @@ impl Default for DesiredState {
             revision: 0,
             exits: Vec::new(),
             assignments: Vec::new(),
+            dns: Vec::new(),
         }
     }
 }

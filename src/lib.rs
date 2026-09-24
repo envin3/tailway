@@ -1,5 +1,6 @@
 pub mod catalog;
 pub mod control;
+pub mod dns;
 pub mod domain;
 pub mod platform;
 pub mod policy;

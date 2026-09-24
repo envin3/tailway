@@ -180,7 +180,7 @@ const renderDevices = () => {
     if (device.missing) return `
     <tr class="missing"><td><strong>Removed from tailnet</strong><br><small>${escapeHTML(device.nodeId)}</small></td><td>—</td><td>Missing</td><td>—</td><td>
       <button class="secondary" data-clear-node="${escapeHTML(device.nodeId)}">Clear assignment</button>
-    </td></tr>`;
+    </td><td>—</td></tr>`;
     return `
     <tr><td><strong>${escapeHTML(device.displayName || device.nodeId)}</strong><br><small>${escapeHTML(device.nodeId)}</small></td><td>${escapeHTML((device.addresses || []).join(", ") || "No IPv4 address")}</td><td>${device.online ? "Online" : "Offline"}</td><td><span class="activity ${device.active ? "observed" : ""}">${device.active ? "Observed" : device.online ? "Not observed" : "Offline"}</span></td><td>
       <select data-node="${escapeHTML(device.nodeId)}">
@@ -190,8 +190,20 @@ const renderDevices = () => {
         ${state.servers.map(server => `<option value="${escapeHTML(server.id)}" ${selectedExit?.serverId === server.id ? "selected" : ""}>${escapeHTML(server.name)} · ${escapeHTML(server.country)}${server.city ? ` · ${escapeHTML(server.city)}` : ""}</option>`).join("")}
       </select>
       ${selectedExit ? `<small>${escapeHTML(selectedExit.status)}</small>` : ""}
-    </td></tr>`;
-  }).join("") : `<tr><td colspan="5" class="empty">${state.devices.length ? "No matching nodes." : "No Tailscale peers are visible."}</td></tr>`;
+    </td><td>${dnsCell(device)}</td></tr>`;
+  }).join("") : `<tr><td colspan="6" class="empty">${state.devices.length ? "No matching nodes." : "No Tailscale peers are visible."}</td></tr>`;
+};
+
+const dnsCell = device => {
+  const dns = device.dns;
+  if (!dns) return `<small>Forwarder off</small>`;
+  const id = escapeHTML(device.nodeId);
+  const onProton = device.exitId && !BUILTIN_ROUTES.has(device.exitId);
+  const server = `<input class="dns-server" data-dns-server="${id}" value="${escapeHTML(dns.customServer || "")}" placeholder="${escapeHTML(dns.defaultServer)} (default)" aria-label="DNS server">`;
+  if (!onProton) return server;
+  const status = { proton: "Proton DNS in tunnel", blocked: "Blocked: tunnel down", server: `Fallback ${escapeHTML(dns.server)}` }[dns.resolution] || escapeHTML(dns.resolution);
+  const killSwitch = `<label class="inline-check"><input type="checkbox" data-dns-kill="${id}" ${dns.killSwitch ? "checked" : ""}> Kill switch</label>`;
+  return `<small>${status}</small><br>${killSwitch}${dns.killSwitch ? "" : `<br>${server}`}`;
 };
 
 const mutate = async (path, method, body = {}) => {
@@ -270,6 +282,10 @@ document.querySelector("#exit-form").addEventListener("submit", event => {
   mutate("/v1/exits", "POST", { serverId: state.selectedServer.id, displayName: document.querySelector("#exit-name").value.trim() });
 });
 document.querySelector("#device-list").addEventListener("change", event => {
+  const killSwitch = event.target.closest("[data-dns-kill]");
+  if (killSwitch) return mutate(`/v1/dns/${encodeURIComponent(killSwitch.dataset.dnsKill)}`, "PUT", { killSwitch: killSwitch.checked });
+  const dnsServer = event.target.closest("[data-dns-server]");
+  if (dnsServer) return mutate(`/v1/dns/${encodeURIComponent(dnsServer.dataset.dnsServer)}`, "PUT", { server: dnsServer.value.trim() });
   const selector = event.target.closest("[data-node]");
   if (!selector) return;
   const path = `/v1/routes/${encodeURIComponent(selector.dataset.node)}`;

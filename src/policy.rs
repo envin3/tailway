@@ -17,6 +17,8 @@ pub struct Input<'a> {
     pub devices: &'a [Device],
     pub assignments: &'a [Assignment],
     pub unassigned: UnassignedPolicy,
+    /// Redirect DNS sent to the gateway's own tailnet address to this local port.
+    pub dns_port: Option<u16>,
 }
 
 pub struct Compiled {
@@ -49,7 +51,7 @@ impl Route<'_> {
 
 /// Only these exits carry traffic. A degraded exit still has a tunnel, so traffic
 /// stays inside it (and is dropped there) rather than falling back to the WAN.
-fn routable(status: &ExitStatus) -> bool {
+pub fn routable(status: &ExitStatus) -> bool {
     matches!(status, ExitStatus::Healthy | ExitStatus::Degraded)
 }
 
@@ -223,6 +225,21 @@ pub fn compile(input: Input<'_>) -> Result<Compiled> {
         )?;
     }
     writeln!(output, "  }}")?;
+    if let Some(port) = input.dns_port {
+        // Only queries addressed to the gateway itself; forwarded DNS to other
+        // resolvers is routed like any other traffic.
+        writeln!(output, "  chain dns_redirect {{")?;
+        writeln!(
+            output,
+            "    type nat hook prerouting priority dstnat; policy accept;"
+        )?;
+        writeln!(
+            output,
+            "    iifname {:?} fib daddr type local meta l4proto {{ tcp, udp }} th dport 53 redirect to :{port}",
+            input.tailscale_interface
+        )?;
+        writeln!(output, "  }}")?;
+    }
     writeln!(output, "  chain postrouting {{")?;
     writeln!(
         output,
@@ -305,8 +322,28 @@ mod tests {
             devices,
             assignments,
             unassigned,
+            dns_port: None,
         })
         .unwrap()
+    }
+
+    #[test]
+    fn redirects_dns_for_the_gateway_only_when_enabled() {
+        let compiled = compile(Input {
+            wan_interface: "eth0",
+            tailscale_interface: "tailscale0",
+            exits: &[],
+            devices: &[],
+            assignments: &[],
+            unassigned: UnassignedPolicy::Block,
+            dns_port: Some(5353),
+        })
+        .unwrap();
+        assert!(compiled.ruleset.contains(
+            "iifname \"tailscale0\" fib daddr type local meta l4proto { tcp, udp } th dport 53 redirect to :5353"
+        ));
+        let disabled = compile_with(&[], &[], &[], UnassignedPolicy::Block);
+        assert!(!disabled.ruleset.contains("dns_redirect"));
     }
 
     #[test]

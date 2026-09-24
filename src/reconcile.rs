@@ -11,6 +11,7 @@ use tokio::sync::Mutex;
 use tracing::{info, warn};
 
 use crate::catalog::StaticCatalog;
+use crate::dns;
 use crate::domain::{Exit, ExitStatus, UnassignedPolicy};
 use crate::platform::Runner;
 use crate::policy::{self, MARK_MASK};
@@ -35,6 +36,14 @@ pub struct Config {
     pub runtime_directory: PathBuf,
     pub dry_run: bool,
     pub unassigned: UnassignedPolicy,
+    pub dns: Option<DnsConfig>,
+}
+
+#[derive(Clone, Copy)]
+pub struct DnsConfig {
+    pub defaults: dns::Defaults,
+    /// Local port the forwarder listens on; tailnet port 53 is redirected here.
+    pub port: u16,
 }
 
 #[derive(Default)]
@@ -63,6 +72,7 @@ pub struct Reconciler {
     runner: Runner,
     runtime: Mutex<Runtime>,
     published: std::sync::Mutex<Published>,
+    dns: Option<Arc<dns::Resolver>>,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -81,6 +91,9 @@ impl Reconciler {
         runner: Runner,
     ) -> Self {
         Self {
+            dns: config
+                .dns
+                .map(|dns| Arc::new(dns::Resolver::new(dns.defaults))),
             config,
             store,
             catalog,
@@ -99,6 +112,11 @@ impl Reconciler {
         self.config.unassigned
     }
 
+    /// The per-client DNS plan, when the DNS forwarder is enabled.
+    pub fn dns(&self) -> Option<&Arc<dns::Resolver>> {
+        self.dns.as_ref()
+    }
+
     pub async fn install_baseline(&self) -> Result<()> {
         let compiled = policy::compile(policy::Input {
             wan_interface: &self.config.wan_interface,
@@ -107,6 +125,7 @@ impl Reconciler {
             devices: &[],
             assignments: &[],
             unassigned: UnassignedPolicy::Block,
+            dns_port: self.config.dns.map(|dns| dns.port),
         })?;
         self.apply_ruleset(&compiled.ruleset).await
     }
@@ -191,6 +210,7 @@ impl Reconciler {
             devices: &devices,
             assignments: &desired.assignments,
             unassigned: self.config.unassigned,
+            dns_port: self.config.dns.map(|dns| dns.port),
         })?;
         if compiled.unknown_nodes != runtime.unknown_nodes {
             if !compiled.unknown_nodes.is_empty() {
@@ -206,6 +226,15 @@ impl Reconciler {
             .await;
         runtime.applied_routes = compiled.routes;
         runtime.applied_revision = Some(revision);
+        if let Some(resolver) = &self.dns {
+            resolver.replace(dns::plan(dns::PlanInput {
+                devices: &devices,
+                assignments: &desired.assignments,
+                exits: &runtime_exits,
+                settings: &desired.dns,
+                defaults: resolver.defaults(),
+            }));
+        }
         *self.published() = Published {
             exits: runtime_exits,
             last_error: String::new(),
@@ -580,6 +609,7 @@ mod tests {
                 runtime_directory: directory.join("run"),
                 dry_run: true,
                 unassigned: UnassignedPolicy::Block,
+                dns: None,
             },
             store.clone(),
             Arc::new(StaticCatalog::new(
