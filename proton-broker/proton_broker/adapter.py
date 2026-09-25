@@ -72,6 +72,12 @@ class ProtonCoreAdapter:
             self._refresh_enabled = True
         return True
 
+    async def current_private_key(self) -> Optional[str]:
+        """The session's WireGuard private key, which every profile must use."""
+        if not self._api.is_user_logged_in():
+            return None
+        return self._api.account_data.vpn_credentials.pubkey_credentials.wg_private_key
+
     def _certificate_remaining_seconds(self) -> Optional[int]:
         try:
             credentials = self._api.account_data.vpn_credentials.pubkey_credentials

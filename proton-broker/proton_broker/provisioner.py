@@ -19,6 +19,30 @@ class CatalogProvisioner:
             return []
         return [server["id"] for server in catalog.get("servers", []) if server.get("id")]
 
+    def stale_server_ids(self, private_key: str) -> list[str]:
+        """Imported servers whose profile is missing or uses another key."""
+        try:
+            catalog = json.loads(self.catalog_path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return []
+        stale = []
+        for server in catalog.get("servers", []):
+            if not server.get("id"):
+                continue
+            try:
+                config = (self.configs_path / server["configFile"]).read_text(encoding="utf-8")
+            except (KeyError, OSError):
+                stale.append(server["id"])
+                continue
+            keys = [
+                line.split("=", 1)[1].strip()
+                for line in config.splitlines()
+                if line.split("=", 1)[0].strip() == "PrivateKey" and "=" in line
+            ]
+            if keys != [private_key]:
+                stale.append(server["id"])
+        return stale
+
     def add(self, server: dict[str, Any]) -> None:
         filename = f"live-{hashlib.sha256(server['id'].encode()).hexdigest()[:24]}.conf"
         self.configs_path.mkdir(mode=0o2770, parents=True, exist_ok=True)

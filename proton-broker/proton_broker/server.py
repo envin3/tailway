@@ -5,6 +5,7 @@ import logging
 import os
 import socketserver
 import threading
+import time
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from typing import Any
@@ -17,6 +18,7 @@ logger = logging.getLogger("proton_broker")
 
 MAX_BODY_BYTES = 16 * 1024
 PROTON_CALL_TIMEOUT_SECONDS = float(os.environ.get("PROTON_CALL_TIMEOUT_SECONDS", "30"))
+PROFILE_SYNC_INTERVAL_SECONDS = float(os.environ.get("PROFILE_SYNC_INTERVAL_SECONDS", "300"))
 
 
 class ProtonCallTimeout(Exception):
@@ -145,15 +147,47 @@ class BrokerApplication:
         self.ensure_background_refresh()
         if self.provisioner is None:
             return result
+        refreshed, failed = self._regenerate(self.provisioner.server_ids())
+        return {**result, "configurationsRefreshed": refreshed, "configurationsFailed": failed}
+
+    def _regenerate(self, server_ids: list[str]) -> tuple[int, list[str]]:
         refreshed, failed = 0, []
-        for server_id in self.provisioner.server_ids():
+        for server_id in server_ids:
             try:
                 self.provisioner.add(self._run(self.adapter.provision(server_id)))
                 refreshed += 1
             except Exception:  # pylint: disable=broad-except
                 failed.append(server_id)
                 logger.warning("could not regenerate configuration for %s", server_id, exc_info=True)
-        return {**result, "configurationsRefreshed": refreshed, "configurationsFailed": failed}
+        return refreshed, failed
+
+    def sync_profiles(self) -> tuple[int, list[str]]:
+        """Regenerate profiles that do not use the session's current key.
+
+        Profiles imported before a sign-in, restored from a backup, or left over
+        from an earlier session carry a key Proton no longer forwards traffic
+        for: their tunnels complete handshakes but pass nothing. Best effort.
+        """
+        if self.provisioner is None:
+            return 0, []
+        with self.lock:
+            try:
+                private_key = self._run(self.adapter.current_private_key())
+                if not private_key:
+                    return 0, []
+                stale = self.provisioner.stale_server_ids(private_key)
+            except Exception:  # pylint: disable=broad-except
+                logger.warning("could not check imported profiles", exc_info=True)
+                return 0, []
+            if not stale:
+                return 0, []
+            logger.info("regenerating %d profile(s) that use an outdated key", len(stale))
+            return self._regenerate(stale)
+
+    def sync_profiles_forever(self, interval: float = PROFILE_SYNC_INTERVAL_SECONDS) -> None:
+        while True:
+            self.sync_profiles()
+            time.sleep(interval)
 
 
 def required_text(body: dict[str, Any], field: str, maximum: int) -> str:
@@ -239,6 +273,9 @@ def main() -> None:
     application = BrokerApplication(ProtonCoreAdapter(), provisioner)
     if application.ensure_background_refresh():
         logger.info("Proton background refresh started for the saved session")
+    threading.Thread(
+        target=application.sync_profiles_forever, name="profile-sync", daemon=True
+    ).start()
     with BrokerServer(str(socket_path), application) as server:
         socket_path.chmod(0o660)
         server.serve_forever()

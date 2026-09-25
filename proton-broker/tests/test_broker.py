@@ -15,13 +15,18 @@ class FakeProvisioner:
         self.server = None
         self.added = []
         self.ids = list(server_ids)
+        self.keys = {}
 
     def server_ids(self):
         return list(self.ids)
 
+    def stale_server_ids(self, private_key):
+        return [server_id for server_id in self.ids if self.keys.get(server_id) != private_key]
+
     def add(self, server):
         self.server = server
         self.added.append(server["id"])
+        self.keys[server["id"]] = server.get("key")
 
 
 class FakeAdapter:
@@ -31,6 +36,8 @@ class FakeAdapter:
         self.login_call = None
         self.refresh_enabled = False
         self.refresh_error = None
+        self.private_key = "current-key"
+        self.provision_error = None
 
     async def enable_refresh(self):
         if self.refresh_error:
@@ -63,8 +70,14 @@ class FakeAdapter:
             raise PermissionError("Proton account login required")
         return [{"id": "logical-1", "name": "CH#1"}]
 
+    async def current_private_key(self):
+        return self.private_key if self.logged_in else None
+
     async def provision(self, server_id):
+        if self.provision_error:
+            raise self.provision_error
         return {
+            "key": self.private_key,
             "id": server_id,
             "name": "CH#1",
             "country": "CH",
@@ -172,6 +185,34 @@ class BackgroundRefreshTests(unittest.TestCase):
         self.assertFalse(adapter.refresh_enabled)
 
 
+class ProfileSyncTests(unittest.TestCase):
+    def test_regenerates_only_profiles_with_another_key(self):
+        adapter = FakeAdapter()
+        adapter.logged_in = True
+        provisioner = FakeProvisioner(["current", "outdated", "missing"])
+        provisioner.keys = {"current": "current-key", "outdated": "old-key"}
+        application = BrokerApplication(adapter, provisioner)
+        self.assertEqual(application.sync_profiles(), (2, []))
+        self.assertEqual(provisioner.added, ["outdated", "missing"])
+        self.assertEqual(application.sync_profiles(), (0, []))
+
+    def test_does_nothing_while_signed_out_or_without_a_provisioner(self):
+        provisioner = FakeProvisioner(["outdated"])
+        self.assertEqual(BrokerApplication(FakeAdapter(), provisioner).sync_profiles(), (0, []))
+        self.assertEqual(provisioner.added, [])
+        adapter = FakeAdapter()
+        adapter.logged_in = True
+        self.assertEqual(BrokerApplication(adapter).sync_profiles(), (0, []))
+
+    def test_reports_profiles_that_could_not_be_regenerated(self):
+        adapter = FakeAdapter()
+        adapter.logged_in = True
+        adapter.provision_error = ValueError("server has no online WireGuard endpoint")
+        provisioner = FakeProvisioner(["outdated"])
+        application = BrokerApplication(adapter, provisioner)
+        self.assertEqual(application.sync_profiles(), (0, ["outdated"]))
+
+
 class SlowAdapter(FakeAdapter):
     def __init__(self, delay):
         super().__init__()
@@ -240,6 +281,27 @@ class CatalogProvisionerTests(unittest.TestCase):
             config = configs / data["servers"][0]["configFile"]
             self.assertEqual(config.read_text(), "[Interface]\nPrivateKey = secret\n")
             self.assertEqual(config.stat().st_mode & 0o777, 0o640)
+
+
+class StaleProfileDetectionTests(unittest.TestCase):
+    def test_finds_profiles_with_another_or_no_key(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            configs = root / "configs"
+            configs.mkdir()
+            (configs / "a.conf").write_text("[Interface]\nPrivateKey = current=\n[Peer]\n")
+            (configs / "b.conf").write_text("[Interface]\nPrivateKey = old=\n[Peer]\n")
+            catalog = root / "catalog.json"
+            catalog.write_text(__import__("json").dumps({"servers": [
+                {"id": "a", "configFile": "a.conf"},
+                {"id": "b", "configFile": "b.conf"},
+                {"id": "c", "configFile": "c.conf"},
+            ]}))
+            provisioner = CatalogProvisioner(str(catalog), str(configs))
+            self.assertEqual(provisioner.stale_server_ids("current="), ["b", "c"])
+            self.assertEqual(
+                CatalogProvisioner(str(root / "none.json"), str(configs)).stale_server_ids("x"), []
+            )
 
 
 class ServerSanitizationTests(unittest.TestCase):
