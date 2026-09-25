@@ -307,7 +307,7 @@ dialog::backdrop { background: rgb(8 14 18 / 55%); backdrop-filter: blur(2px); }
 .load-bar span.warn { background: var(--warn); } .load-bar span.bad { background: var(--bad); }
 .import-sheet { height: auto; max-height: calc(100vh - 48px); }
 .import-form { display: flex; flex-direction: column; min-height: 0; flex: 1; }
-.import-form .sheet-body { padding: 8px 20px 16px; }
+.import-form .sheet-body { padding: 8px 20px 16px; align-content: start; }
 .sheet-footer { padding: 14px 20px; border-top: 1px solid var(--border); }
 textarea { width: 100%; padding: 10px 12px; background: var(--surface); color: var(--text); border: 1px solid var(--border-strong); border-radius: var(--radius-sm); font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; resize: vertical; }
 textarea:focus { border-color: var(--primary); }

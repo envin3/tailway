@@ -674,8 +674,14 @@ const guessFromFileName = fileName => {
 };
 
 $("#import-location").addEventListener("click", openImport);
-$("#import-close").addEventListener("click", () => $("#import-dialog").close());
-$("#import-cancel").addEventListener("click", () => $("#import-dialog").close());
+// Drop a pasted private key as soon as the dialog is dismissed.
+const closeImport = () => {
+  $("#import-config").value = "";
+  $("#import-file").value = "";
+  $("#import-dialog").close();
+};
+$("#import-close").addEventListener("click", closeImport);
+$("#import-cancel").addEventListener("click", closeImport);
 $("#import-file").addEventListener("change", async event => {
   const file = event.target.files[0];
   if (!file) return;
@@ -698,14 +704,13 @@ $("#import-form").addEventListener("submit", async event => {
         city: $("#import-city").value.trim(),
         config: $("#import-config").value
       }) });
-      $("#import-config").value = "";
-      $("#import-dialog").close();
+      closeImport();
       toast(`${flag(server.country)} ${server.name} (${server.provider}) imported. Choose it for a device on the Devices page.`);
       await load();
     } catch (error) { toast(error.message, "bad"); }
   });
 });
-// Never keep a pasted private key around after the dialog closes.
+// Escape closes the dialog without the buttons; clear it then too.
 $("#import-dialog").addEventListener("close", () => { $("#import-config").value = ""; $("#import-file").value = ""; });
 
 /* Settings */
