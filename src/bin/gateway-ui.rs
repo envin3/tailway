@@ -341,10 +341,18 @@ async fn same_origin_json(request: Request, next: Next) -> Response {
     if !content_type.starts_with("application/json") {
         return json_error(StatusCode::UNSUPPORTED_MEDIA_TYPE, "expected JSON");
     }
+    // HTTP/1.1 names the site in Host; HTTP/2 (what browsers use here) in the
+    // request URI's authority, with no Host header at all.
     let host = request
         .headers()
         .get(header::HOST)
-        .and_then(|value| value.to_str().ok());
+        .and_then(|value| value.to_str().ok())
+        .or_else(|| {
+            request
+                .uri()
+                .authority()
+                .map(|authority| authority.as_str())
+        });
     if let Some(origin) = request.headers().get(header::ORIGIN) {
         let expected = host.map(|host| format!("https://{host}"));
         if origin.to_str().ok() != expected.as_deref() {
@@ -644,6 +652,12 @@ fn console_name(request: &Request) -> String {
         .headers()
         .get(header::HOST)
         .and_then(|value| value.to_str().ok())
+        .or_else(|| {
+            request
+                .uri()
+                .authority()
+                .map(|authority| authority.as_str())
+        })
         .filter(|host| host.len() <= 255)
         .unwrap_or("the console")
         .to_owned()
@@ -1180,6 +1194,40 @@ mod tests {
         )
         .await;
         assert_eq!(same.status(), StatusCode::OK);
+    }
+
+    /// Browsers speak HTTP/2 to the console: no Host header, the site is in the
+    /// URI authority.
+    #[tokio::test]
+    async fn sign_in_over_http2_is_same_origin() {
+        let Fixture {
+            mut router,
+            _directory: _keep,
+            ..
+        } = fixture(PathBuf::from("/nonexistent"));
+        let request = |origin: &str| {
+            let mut request = Request::builder()
+                .method(Method::POST)
+                .uri("https://192.168.0.52:8443/auth/login")
+                .version(axum::http::Version::HTTP_2)
+                .header(header::ORIGIN, origin)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({"username": "admin", "password": PASSWORD}).to_string(),
+                ))
+                .unwrap();
+            request
+                .extensions_mut()
+                .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 1))));
+            request
+        };
+        let same = router
+            .call(request("https://192.168.0.52:8443"))
+            .await
+            .unwrap();
+        assert_eq!(same.status(), StatusCode::OK);
+        let cross = router.call(request("https://evil.example")).await.unwrap();
+        assert_eq!(cross.status(), StatusCode::FORBIDDEN);
     }
 
     #[tokio::test]
