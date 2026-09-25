@@ -1,7 +1,12 @@
+import base64
 import importlib.metadata
 import secrets
 from typing import Any, Optional
 
+
+# The official client requests one-week certificates and renews them at the
+# RefreshTime the API returns.
+CERTIFICATE_DURATION_MINUTES = 7 * 24 * 60
 
 FEATURE_NAMES = {
     1: "secure-core",
@@ -72,11 +77,34 @@ class ProtonCoreAdapter:
             self._refresh_enabled = True
         return True
 
-    async def current_private_key(self) -> Optional[str]:
-        """The session's WireGuard private key, which every profile must use."""
+    async def issue_certificate(self, ed25519_private_key: Optional[str]) -> dict[str, Any]:
+        """Certificate for an exit's own key; a new key when none is given.
+
+        This is the request the official client makes for its session key
+        (POST /vpn/v1/certificate with the Ed25519 public key in PEM form); the
+        WireGuard key is the X25519 key derived from the same Ed25519 key.
+        """
+        from proton.vpn.session.key_mgr import KeyHandler
+
         if not self._api.is_user_logged_in():
-            return None
-        return self._api.account_data.vpn_credentials.pubkey_credentials.wg_private_key
+            raise PermissionError("Proton account login required")
+        handler = KeyHandler(
+            private_key=base64.b64decode(ed25519_private_key) if ed25519_private_key else None
+        )
+        session = self._api._session_holder.session  # pylint: disable=protected-access
+        response = await session.async_api_request(
+            "/vpn/v1/certificate",
+            jsondata={
+                "ClientPublicKey": handler.ed25519_pk_pem,
+                "Duration": f"{CERTIFICATE_DURATION_MINUTES} min",
+            },
+        )
+        return {
+            "ed25519": base64.b64encode(handler.ed25519_sk_bytes).decode("ascii"),
+            "wireguard": handler.x25519_sk_str,
+            "expires": int(response["ExpirationTime"]),
+            "refresh": int(response["RefreshTime"]),
+        }
 
     def _certificate_remaining_seconds(self) -> Optional[int]:
         try:
@@ -116,7 +144,7 @@ class ProtonCoreAdapter:
         ]
         return sorted(servers, key=lambda server: (server["country"], server["city"], server["name"]))
 
-    async def provision(self, server_id: str) -> dict[str, Any]:
+    async def provision(self, server_id: str, private_key: str) -> dict[str, Any]:
         if not self._api.is_user_logged_in():
             raise PermissionError("Proton account login required")
         server_list = self._api.server_list
@@ -134,10 +162,9 @@ class ProtonCoreAdapter:
         if not physical_servers:
             raise ValueError("server has no online WireGuard endpoint")
         physical = secrets.choice(physical_servers)
-        credentials = self._api.account_data.vpn_credentials.pubkey_credentials
         config = (
             "[Interface]\n"
-            f"PrivateKey = {credentials.wg_private_key}\n"
+            f"PrivateKey = {private_key}\n"
             "Address = 10.2.0.2/32\n"
             "DNS = 10.2.0.1\n\n"
             "[Peer]\n"

@@ -3,7 +3,7 @@ import json
 import os
 import tempfile
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 
 class CatalogProvisioner:
@@ -19,29 +19,20 @@ class CatalogProvisioner:
             return []
         return [server["id"] for server in catalog.get("servers", []) if server.get("id")]
 
-    def stale_server_ids(self, private_key: str) -> list[str]:
-        """Imported servers whose profile is missing or uses another key."""
+    def profile_key(self, server_id: str) -> Optional[str]:
+        """The WireGuard private key in a server's profile, if it has exactly one."""
         try:
             catalog = json.loads(self.catalog_path.read_text(encoding="utf-8"))
-        except FileNotFoundError:
-            return []
-        stale = []
-        for server in catalog.get("servers", []):
-            if not server.get("id"):
-                continue
-            try:
-                config = (self.configs_path / server["configFile"]).read_text(encoding="utf-8")
-            except (KeyError, OSError):
-                stale.append(server["id"])
-                continue
-            keys = [
-                line.split("=", 1)[1].strip()
-                for line in config.splitlines()
-                if line.split("=", 1)[0].strip() == "PrivateKey" and "=" in line
-            ]
-            if keys != [private_key]:
-                stale.append(server["id"])
-        return stale
+            entry = next(server for server in catalog.get("servers", []) if server.get("id") == server_id)
+            config = (self.configs_path / entry["configFile"]).read_text(encoding="utf-8")
+        except (FileNotFoundError, StopIteration, KeyError, OSError, ValueError):
+            return None
+        keys = [
+            line.split("=", 1)[1].strip()
+            for line in config.splitlines()
+            if "=" in line and line.split("=", 1)[0].strip() == "PrivateKey"
+        ]
+        return keys[0] if len(keys) == 1 else None
 
     def add(self, server: dict[str, Any]) -> None:
         filename = f"live-{hashlib.sha256(server['id'].encode()).hexdigest()[:24]}.conf"

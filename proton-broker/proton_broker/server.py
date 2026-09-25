@@ -12,6 +12,7 @@ from typing import Any
 from urllib.parse import unquote
 
 from .adapter import ProtonCoreAdapter
+from .keys import ExitKeyStore
 from .provisioner import CatalogProvisioner
 
 logger = logging.getLogger("proton_broker")
@@ -56,10 +57,15 @@ async def _await(awaitable: Any) -> Any:
 
 class BrokerApplication:
     def __init__(
-        self, adapter: Any, provisioner: Any = None, runner: EventLoopRunner | None = None
+        self,
+        adapter: Any,
+        provisioner: Any = None,
+        runner: EventLoopRunner | None = None,
+        keys: ExitKeyStore | None = None,
     ) -> None:
         self.adapter = adapter
         self.provisioner = provisioner
+        self.keys = keys
         self.pending_two_factor = False
         self.runner = runner or EventLoopRunner()
         # Requests are served on separate threads so /healthz never waits on
@@ -84,17 +90,16 @@ class BrokerApplication:
                 # Also retries starting the refresher if it failed earlier, for
                 # example because Proton's API was unreachable at startup.
                 self.ensure_background_refresh()
-                return 200, self._run(self.adapter.account())
+                return 200, self._with_exit_certificates(self._run(self.adapter.account()))
             if method == "GET" and path == "/v1/proton/servers":
                 return 200, {"servers": self._run(self.adapter.servers())}
             if method == "POST" and path.startswith("/v1/proton/servers/") and path.endswith("/add"):
-                if self.provisioner is None:
+                if self.provisioner is None or self.keys is None:
                     return 503, {"error": "server provisioning is not configured"}
                 server_id = unquote(path[len("/v1/proton/servers/"):-len("/add")])
                 if not server_id or "/" in server_id:
                     raise ValueError("invalid server ID")
-                server = self._run(self.adapter.provision(server_id))
-                self.provisioner.add(server)
+                self._provision(server_id, self._exit_identity(server_id))
                 return 200, {"serverId": server_id, "state": "added"}
             if method == "POST" and path == "/v1/proton/login":
                 username = required_text(body, "username", 320)
@@ -145,44 +150,72 @@ class BrokerApplication:
         if result.get("state") != "authenticated":
             return result
         self.ensure_background_refresh()
-        if self.provisioner is None:
+        if self.provisioner is None or self.keys is None:
             return result
-        refreshed, failed = self._regenerate(self.provisioner.server_ids())
-        return {**result, "configurationsRefreshed": refreshed, "configurationsFailed": failed}
-
-    def _regenerate(self, server_ids: list[str]) -> tuple[int, list[str]]:
         refreshed, failed = 0, []
-        for server_id in server_ids:
+        for server_id in self.provisioner.server_ids():
             try:
-                self.provisioner.add(self._run(self.adapter.provision(server_id)))
+                # Certificates issued under the previous session may be revoked.
+                self._provision(server_id, self._exit_identity(server_id, renew=True))
                 refreshed += 1
             except Exception:  # pylint: disable=broad-except
                 failed.append(server_id)
                 logger.warning("could not regenerate configuration for %s", server_id, exc_info=True)
-        return refreshed, failed
+        return {**result, "configurationsRefreshed": refreshed, "configurationsFailed": failed}
+
+    def _exit_identity(self, server_id: str, renew: bool = False) -> dict[str, Any]:
+        """The exit's own key, with a certificate that is not due for renewal."""
+        record = self.keys.get(server_id)
+        if renew or ExitKeyStore.needs_certificate(record):
+            record = self._run(
+                self.adapter.issue_certificate(record["ed25519"] if record else None)
+            )
+            self.keys.put(server_id, record)
+        return record
+
+    def _provision(self, server_id: str, identity: dict[str, Any]) -> None:
+        self.provisioner.add(self._run(self.adapter.provision(server_id, identity["wireguard"])))
+
+    def _with_exit_certificates(self, account: dict[str, Any]) -> dict[str, Any]:
+        """Report the exit certificate closest to expiry: that is what fails first."""
+        if self.keys is None or self.provisioner is None or account.get("state") != "authenticated":
+            return account
+        records = [self.keys.get(server_id) for server_id in self.provisioner.server_ids()]
+        expiries = [record["expires"] for record in records if record]
+        if expiries:
+            account = {**account, "certificateValidSeconds": int(min(expiries) - time.time())}
+        return account
 
     def sync_profiles(self) -> tuple[int, list[str]]:
-        """Regenerate profiles that do not use the session's current key.
+        """Keep every imported exit on its own key with a current certificate.
 
-        Profiles imported before a sign-in, restored from a backup, or left over
-        from an earlier session carry a key Proton no longer forwards traffic
-        for: their tunnels complete handshakes but pass nothing. Best effort.
+        Renews certificates when Proton's refresh time passes (the profile does
+        not change), and rewrites profiles that do not carry the exit's key:
+        profiles from before per-exit keys, restored from a backup, or written
+        by an earlier session. Such tunnels complete handshakes but pass nothing.
+        Best effort; returns (profiles rewritten, server IDs that failed).
         """
-        if self.provisioner is None:
+        if self.provisioner is None or self.keys is None:
             return 0, []
+        rewritten, failed = 0, []
         with self.lock:
             try:
-                private_key = self._run(self.adapter.current_private_key())
-                if not private_key:
+                if self._run(self.adapter.account()).get("state") != "authenticated":
                     return 0, []
-                stale = self.provisioner.stale_server_ids(private_key)
             except Exception:  # pylint: disable=broad-except
-                logger.warning("could not check imported profiles", exc_info=True)
+                logger.warning("could not read the Proton session state", exc_info=True)
                 return 0, []
-            if not stale:
-                return 0, []
-            logger.info("regenerating %d profile(s) that use an outdated key", len(stale))
-            return self._regenerate(stale)
+            for server_id in self.provisioner.server_ids():
+                try:
+                    identity = self._exit_identity(server_id)
+                    if self.provisioner.profile_key(server_id) != identity["wireguard"]:
+                        logger.info("rewriting the profile of %s with its own key", server_id)
+                        self._provision(server_id, identity)
+                        rewritten += 1
+                except Exception:  # pylint: disable=broad-except
+                    failed.append(server_id)
+                    logger.warning("could not update the key or certificate of %s", server_id, exc_info=True)
+        return rewritten, failed
 
     def sync_profiles_forever(self, interval: float = PROFILE_SYNC_INTERVAL_SECONDS) -> None:
         while True:
@@ -270,7 +303,10 @@ def main() -> None:
         os.environ.get("PROTON_CATALOG_PATH", "/etc/tailscale-exit-policy-router/catalog.json"),
         os.environ.get("PROTON_CONFIGS_PATH", "/run/secrets/proton"),
     )
-    application = BrokerApplication(ProtonCoreAdapter(), provisioner)
+    keys = ExitKeyStore(
+        os.environ.get("EXIT_KEYS_PATH", "/var/lib/proton-broker/exit-keys.json")
+    )
+    application = BrokerApplication(ProtonCoreAdapter(), provisioner, keys=keys)
     if application.ensure_background_refresh():
         logger.info("Proton background refresh started for the saved session")
     threading.Thread(

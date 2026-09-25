@@ -7,7 +7,15 @@ sys.path.insert(0, str(Path(__file__).parents[1]))
 
 from proton_broker.adapter import sanitize_server
 from proton_broker.server import BrokerApplication, EventLoopRunner
+from proton_broker.keys import ExitKeyStore
 from proton_broker.provisioner import CatalogProvisioner
+
+
+def key_store():
+    directory = tempfile.TemporaryDirectory()
+    store = ExitKeyStore(str(Path(directory.name) / "exit-keys.json"))
+    store.directory = directory  # keep the directory alive with the store
+    return store
 
 
 class FakeProvisioner:
@@ -20,8 +28,8 @@ class FakeProvisioner:
     def server_ids(self):
         return list(self.ids)
 
-    def stale_server_ids(self, private_key):
-        return [server_id for server_id in self.ids if self.keys.get(server_id) != private_key]
+    def profile_key(self, server_id):
+        return self.keys.get(server_id)
 
     def add(self, server):
         self.server = server
@@ -36,7 +44,7 @@ class FakeAdapter:
         self.login_call = None
         self.refresh_enabled = False
         self.refresh_error = None
-        self.private_key = "current-key"
+        self.issued = []
         self.provision_error = None
 
     async def enable_refresh(self):
@@ -70,14 +78,18 @@ class FakeAdapter:
             raise PermissionError("Proton account login required")
         return [{"id": "logical-1", "name": "CH#1"}]
 
-    async def current_private_key(self):
-        return self.private_key if self.logged_in else None
+    async def issue_certificate(self, ed25519_private_key):
+        if not self.logged_in:
+            raise PermissionError("Proton account login required")
+        ed25519 = ed25519_private_key or f"ed-{len(self.issued)}"
+        self.issued.append(ed25519)
+        return {"ed25519": ed25519, "wireguard": f"wg-{ed25519}", "expires": 2_000_000_000, "refresh": 1_900_000_000}
 
-    async def provision(self, server_id):
+    async def provision(self, server_id, private_key):
         if self.provision_error:
             raise self.provision_error
         return {
-            "key": self.private_key,
+            "key": private_key,
             "id": server_id,
             "name": "CH#1",
             "country": "CH",
@@ -139,15 +151,21 @@ class BrokerApplicationTests(unittest.TestCase):
         self.assertEqual((status, payload), (200, {"state": "signedOut"}))
         self.assertFalse(self.adapter.logged_in)
 
-    def test_adds_discovered_server(self):
+    def test_adds_discovered_server_with_its_own_key(self):
+        self.adapter.logged_in = True
         provisioner = FakeProvisioner()
-        application = BrokerApplication(self.adapter, provisioner)
+        keys = key_store()
+        application = BrokerApplication(self.adapter, provisioner, keys=keys)
         status, payload = application.dispatch(
             "POST", "/v1/proton/servers/logical%2D1/add", {}
         )
         self.assertEqual(status, 200)
         self.assertEqual(payload, {"serverId": "logical-1", "state": "added"})
         self.assertEqual(provisioner.server["id"], "logical-1")
+        self.assertEqual(provisioner.server["key"], "wg-ed-0")
+        self.assertEqual(keys.get("logical-1")["ed25519"], "ed-0")
+        application.dispatch("POST", "/v1/proton/servers/logical-2/add", {})
+        self.assertEqual(provisioner.server["key"], "wg-ed-1")
 
 
 class BackgroundRefreshTests(unittest.TestCase):
@@ -158,13 +176,18 @@ class BackgroundRefreshTests(unittest.TestCase):
     def test_sign_in_starts_refresh_and_regenerates_imported_configs(self):
         adapter = FakeAdapter()
         provisioner = FakeProvisioner(["logical-1", "logical-2"])
-        application = BrokerApplication(adapter, provisioner)
+        keys = key_store()
+        keys.put("logical-1", {"ed25519": "kept", "wireguard": "wg-kept", "expires": 2_000_000_000, "refresh": 1_900_000_000})
+        application = BrokerApplication(adapter, provisioner, keys=keys)
         status, payload = self.sign_in(application, adapter)
         self.assertEqual(status, 200)
         self.assertTrue(adapter.refresh_enabled)
         self.assertEqual(provisioner.added, ["logical-1", "logical-2"])
         self.assertEqual(payload["configurationsRefreshed"], 2)
         self.assertEqual(payload["configurationsFailed"], [])
+        # Keys survive a new sign-in; only the certificates are renewed.
+        self.assertEqual(adapter.issued, ["kept", "ed-1"])
+        self.assertEqual(provisioner.keys["logical-1"], "wg-kept")
 
     def test_account_poll_starts_refresh_for_a_saved_session(self):
         adapter = FakeAdapter()
@@ -186,31 +209,51 @@ class BackgroundRefreshTests(unittest.TestCase):
 
 
 class ProfileSyncTests(unittest.TestCase):
-    def test_regenerates_only_profiles_with_another_key(self):
-        adapter = FakeAdapter()
-        adapter.logged_in = True
-        provisioner = FakeProvisioner(["current", "outdated", "missing"])
-        provisioner.keys = {"current": "current-key", "outdated": "old-key"}
-        application = BrokerApplication(adapter, provisioner)
+    def setUp(self):
+        self.adapter = FakeAdapter()
+        self.adapter.logged_in = True
+        self.keys = key_store()
+
+    def test_gives_every_exit_its_own_key_once(self):
+        provisioner = FakeProvisioner(["a", "b"])
+        provisioner.keys = {"a": "old-shared-session-key", "b": "old-shared-session-key"}
+        application = BrokerApplication(self.adapter, provisioner, keys=self.keys)
         self.assertEqual(application.sync_profiles(), (2, []))
-        self.assertEqual(provisioner.added, ["outdated", "missing"])
+        self.assertEqual(provisioner.keys, {"a": "wg-ed-0", "b": "wg-ed-1"})
         self.assertEqual(application.sync_profiles(), (0, []))
+        self.assertEqual(self.adapter.issued, ["ed-0", "ed-1"])
 
-    def test_does_nothing_while_signed_out_or_without_a_provisioner(self):
-        provisioner = FakeProvisioner(["outdated"])
-        self.assertEqual(BrokerApplication(FakeAdapter(), provisioner).sync_profiles(), (0, []))
+    def test_renews_due_certificates_without_rewriting_profiles(self):
+        provisioner = FakeProvisioner(["a"])
+        provisioner.keys = {"a": "wg-kept"}
+        self.keys.put("a", {"ed25519": "kept", "wireguard": "wg-kept", "expires": 10, "refresh": 5})
+        application = BrokerApplication(self.adapter, provisioner, keys=self.keys)
+        self.assertEqual(application.sync_profiles(), (0, []))
+        self.assertEqual(self.adapter.issued, ["kept"])
+        self.assertEqual(self.keys.get("a")["refresh"], 1_900_000_000)
         self.assertEqual(provisioner.added, [])
-        adapter = FakeAdapter()
-        adapter.logged_in = True
-        self.assertEqual(BrokerApplication(adapter).sync_profiles(), (0, []))
 
-    def test_reports_profiles_that_could_not_be_regenerated(self):
-        adapter = FakeAdapter()
-        adapter.logged_in = True
-        adapter.provision_error = ValueError("server has no online WireGuard endpoint")
-        provisioner = FakeProvisioner(["outdated"])
-        application = BrokerApplication(adapter, provisioner)
-        self.assertEqual(application.sync_profiles(), (0, ["outdated"]))
+    def test_does_nothing_while_signed_out_or_unconfigured(self):
+        self.adapter.logged_in = False
+        provisioner = FakeProvisioner(["a"])
+        self.assertEqual(BrokerApplication(self.adapter, provisioner, keys=self.keys).sync_profiles(), (0, []))
+        self.assertEqual(BrokerApplication(self.adapter, provisioner).sync_profiles(), (0, []))
+        self.assertEqual(self.adapter.issued, [])
+
+    def test_reports_exits_that_could_not_be_updated(self):
+        self.adapter.provision_error = ValueError("server has no online WireGuard endpoint")
+        application = BrokerApplication(self.adapter, FakeProvisioner(["a"]), keys=self.keys)
+        self.assertEqual(application.sync_profiles(), (0, ["a"]))
+
+    def test_account_reports_the_exit_certificate_closest_to_expiry(self):
+        provisioner = FakeProvisioner(["a", "b"])
+        import time
+        now = time.time()
+        self.keys.put("a", {"ed25519": "a", "wireguard": "wg-a", "expires": now + 7200, "refresh": now + 3600})
+        self.keys.put("b", {"ed25519": "b", "wireguard": "wg-b", "expires": now + 90000, "refresh": now + 80000})
+        application = BrokerApplication(self.adapter, provisioner, keys=self.keys)
+        _, payload = application.dispatch("GET", "/v1/proton/account", {})
+        self.assertAlmostEqual(payload["certificateValidSeconds"], 7200, delta=5)
 
 
 class SlowAdapter(FakeAdapter):
@@ -283,14 +326,14 @@ class CatalogProvisionerTests(unittest.TestCase):
             self.assertEqual(config.stat().st_mode & 0o777, 0o640)
 
 
-class StaleProfileDetectionTests(unittest.TestCase):
-    def test_finds_profiles_with_another_or_no_key(self):
+class ProfileKeyTests(unittest.TestCase):
+    def test_reads_the_single_private_key_of_a_profile(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             configs = root / "configs"
             configs.mkdir()
-            (configs / "a.conf").write_text("[Interface]\nPrivateKey = current=\n[Peer]\n")
-            (configs / "b.conf").write_text("[Interface]\nPrivateKey = old=\n[Peer]\n")
+            (configs / "a.conf").write_text("[Interface]\nPrivateKey = abc=\n[Peer]\n")
+            (configs / "b.conf").write_text("[Interface]\nPrivateKey = x\nPrivateKey = y\n")
             catalog = root / "catalog.json"
             catalog.write_text(__import__("json").dumps({"servers": [
                 {"id": "a", "configFile": "a.conf"},
@@ -298,10 +341,21 @@ class StaleProfileDetectionTests(unittest.TestCase):
                 {"id": "c", "configFile": "c.conf"},
             ]}))
             provisioner = CatalogProvisioner(str(catalog), str(configs))
-            self.assertEqual(provisioner.stale_server_ids("current="), ["b", "c"])
-            self.assertEqual(
-                CatalogProvisioner(str(root / "none.json"), str(configs)).stale_server_ids("x"), []
-            )
+            self.assertEqual(provisioner.profile_key("a"), "abc=")
+            self.assertIsNone(provisioner.profile_key("b"))
+            self.assertIsNone(provisioner.profile_key("c"))
+            self.assertIsNone(provisioner.profile_key("missing"))
+
+
+class ExitKeyStoreTests(unittest.TestCase):
+    def test_persists_records_privately(self):
+        store = key_store()
+        store.put("a", {"ed25519": "x", "refresh": 5})
+        self.assertEqual(ExitKeyStore(str(store.path)).get("a"), {"ed25519": "x", "refresh": 5})
+        self.assertEqual(store.path.stat().st_mode & 0o777, 0o600)
+        self.assertTrue(ExitKeyStore.needs_certificate(None))
+        self.assertTrue(ExitKeyStore.needs_certificate({"refresh": 5}, now=10))
+        self.assertFalse(ExitKeyStore.needs_certificate({"refresh": 50}, now=10))
 
 
 class ServerSanitizationTests(unittest.TestCase):
