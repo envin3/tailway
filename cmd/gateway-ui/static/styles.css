@@ -305,6 +305,16 @@ dialog::backdrop { background: rgb(8 14 18 / 55%); backdrop-filter: blur(2px); }
 .load-bar { height: 6px; border-radius: 99px; background: var(--surface-2); border: 1px solid var(--border); overflow: hidden; }
 .load-bar span { display: block; height: 100%; background: var(--good); border-radius: inherit; }
 .load-bar span.warn { background: var(--warn); } .load-bar span.bad { background: var(--bad); }
+.import-sheet { height: auto; max-height: calc(100vh - 48px); }
+.import-form { display: flex; flex-direction: column; min-height: 0; flex: 1; }
+.import-form .sheet-body { padding: 8px 20px 16px; }
+.sheet-footer { padding: 14px 20px; border-top: 1px solid var(--border); }
+textarea { width: 100%; padding: 10px 12px; background: var(--surface); color: var(--text); border: 1px solid var(--border-strong); border-radius: var(--radius-sm); font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; resize: vertical; }
+textarea:focus { border-color: var(--primary); }
+textarea:focus-visible { outline: none; box-shadow: var(--focus); }
+input[type="file"] { padding: 7px 10px; }
+.field-row.even { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.provider { color: var(--muted); font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; }
 .more { display: flex; justify-content: center; padding: 14px 0 4px; }
 .confirm { width: min(440px, calc(100vw - 32px)); }
 .confirm form { display: grid; gap: 12px; padding: 22px; }
@@ -369,7 +379,7 @@ dialog::backdrop { background: rgb(8 14 18 / 55%); backdrop-filter: blur(2px); }
 @media (max-width: 560px) {
   .health-pill #health-text { display: none; }
   .health-pill { padding: 8px; }
-  .field-row { grid-template-columns: minmax(0, 1fr); }
+  .field-row, .field-row.even { grid-template-columns: minmax(0, 1fr); }
   .server { grid-template-columns: minmax(0, 1fr) auto; }
   .server .load { grid-column: 1 / -1; grid-row: 2; }
   .sheet { width: 100vw; height: 100dvh; max-width: none; max-height: none; margin: 0; border-radius: 0; }

@@ -1,13 +1,14 @@
 //! Data-plane probes. A fresh WireGuard handshake only proves the control plane:
-//! Proton completes handshakes for a key whose certificate has expired (or whose
-//! session was jailed) but forwards none of its traffic. These probes send real
+//! a provider can complete handshakes for a key it no longer forwards traffic
+//! for (Proton does, once the key's certificate expires or its session is
+//! jailed). These probes send real
 //! packets through a tunnel, selected by its firewall mark, and expect answers.
 
 use std::net::{Ipv4Addr, SocketAddrV4};
 
 use anyhow::{Context, Result, bail};
 
-use crate::dns::{self, PROTON_RESOLVER, Upstream};
+use crate::dns::{self, Upstream};
 
 const TYPE_A: u16 = 1;
 const TYPE_TXT: u16 = 16;
@@ -32,7 +33,7 @@ const ECHO_SERVICES: [EchoService; 2] = [
 ];
 
 /// Any name works; the answer only has to arrive.
-const RESOLVER_PROBE_NAME: &str = "protonvpn.com";
+const RESOLVER_PROBE_NAME: &str = "example.com";
 
 struct EchoService {
     server: Ipv4Addr,
@@ -45,13 +46,14 @@ struct EchoService {
 pub struct Outcome {
     /// The exit's public address as seen on the internet, or why it is unknown.
     pub egress: Result<Ipv4Addr, String>,
-    /// Whether Proton's in-tunnel resolver answers.
+    /// Whether the tunnel's own resolver answers (always `Ok` without one).
     pub resolver: Result<(), String>,
 }
 
-/// Probe internet egress and the Proton resolver through the tunnel with `mark`.
-pub async fn run(mark: u32) -> Outcome {
-    let (egress, resolver) = tokio::join!(public_address(mark), proton_resolver(mark));
+/// Probe internet egress, and the in-tunnel resolver when the tunnel names
+/// one, through the tunnel with `mark`.
+pub async fn run(mark: u32, resolver: Option<Ipv4Addr>) -> Outcome {
+    let (egress, resolver) = tokio::join!(public_address(mark), tunnel_resolver(mark, resolver));
     Outcome {
         egress: egress.map_err(|error| format!("{error:#}")),
         resolver: resolver.map_err(|error| format!("{error:#}")),
@@ -75,14 +77,17 @@ async fn echo(mark: u32, service: &EchoService) -> Result<Ipv4Addr> {
     parse_address(&response, service.qtype)
 }
 
-async fn proton_resolver(mark: u32) -> Result<()> {
+async fn tunnel_resolver(mark: u32, resolver: Option<Ipv4Addr>) -> Result<()> {
+    let Some(resolver) = resolver else {
+        return Ok(());
+    };
     let query = build_query(rand::random(), RESOLVER_PROBE_NAME, TYPE_A, CLASS_IN);
-    let response = dns::query_udp(upstream(PROTON_RESOLVER, mark), &query)
+    let response = dns::query_udp(upstream(resolver, mark), &query)
         .await
-        .context("Proton DNS resolver did not answer")?;
+        .context("the VPN's DNS resolver did not answer")?;
     match rcode(&response)? {
         0 | 3 => Ok(()),
-        code => bail!("Proton DNS resolver answered with rcode {code}"),
+        code => bail!("the VPN's DNS resolver answered with rcode {code}"),
     }
 }
 

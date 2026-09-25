@@ -78,6 +78,12 @@ const flag = code => {
   return String.fromCodePoint(...Array.from(iso, letter => 127397 + letter.charCodeAt(0)));
 };
 
+// ISO 3166-1 codes for the country picker (names come from the browser).
+const COUNTRY_CODES = "AD AE AF AG AI AL AM AO AQ AR AS AT AU AW AX AZ BA BB BD BE BF BG BH BI BJ BL BM BN BO BQ BR BS BT BV BW BY BZ CA CC CD CF CG CH CI CK CL CM CN CO CR CU CV CW CX CY CZ DE DJ DK DM DO DZ EC EE EG EH ER ES ET FI FJ FK FM FO FR GA GB GD GE GF GG GH GI GL GM GN GP GQ GR GS GT GU GW GY HK HM HN HR HT HU ID IE IL IM IN IO IQ IR IS IT JE JM JO JP KE KG KH KI KM KN KP KR KW KY KZ LA LB LC LI LK LR LS LT LU LV LY MA MC MD ME MF MG MH MK ML MM MN MO MP MQ MR MS MT MU MV MW MX MY MZ NA NC NE NF NG NI NL NO NP NR NU NZ OM PA PE PF PG PH PK PL PM PN PR PS PT PW PY QA RE RO RS RU RW SA SB SC SD SE SG SH SI SJ SK SL SM SN SO SR SS ST SV SX SY SZ TC TD TF TG TH TJ TK TL TM TN TO TR TT TV TW TZ UA UG UM US UY UZ VA VC VE VG VI VN VU WF WS XK YE YT ZA ZM ZW".split(" ");
+// Recognised from a configuration's file name, e.g. "mullvad-ch-zrh-wg-001.conf".
+const PROVIDER_HINTS = { mullvad: "Mullvad", ivpn: "IVPN", airvpn: "AirVPN", windscribe: "Windscribe", proton: "Proton VPN", nord: "NordVPN", surfshark: "Surfshark", pia: "PIA" };
+const providerOf = server => server.provider || (server.source === "custom" ? "WireGuard" : "Proton VPN");
+
 const FEATURE_LABELS = { p2p: "P2P", streaming: "Streaming", "secure-core": "Secure Core", tor: "Tor" };
 const featureList = features => (features || []).filter(feature => feature !== "ipv6").map(feature => FEATURE_LABELS[feature] || feature);
 
@@ -252,6 +258,12 @@ const suggestions = () => {
   return list;
 };
 
+const customServerIds = () => new Set(state.catalog.filter(server => server.source === "custom").map(server => server.id));
+const protonTunnels = () => {
+  const custom = customServerIds();
+  return state.exits.filter(exit => !custom.has(exit.serverId)).length;
+};
+
 const overallTone = list => (list.some(item => item.tone === "bad") ? "bad" : list.length ? "warn" : "good");
 
 /* ---------- rendering ---------- */
@@ -302,7 +314,7 @@ const renderDashboard = () => {
   const protectedCount = state.devices.filter(device => routeOf(device).kind === "vpn").length;
   const title = tone === "good" ? "Everything is working" : tone === "warn" ? "Working, with something to check" : "Something needs your attention";
   const subtitle = tone === "good"
-    ? `${protectedCount} ${protectedCount === 1 ? "device goes" : "devices go"} through Proton VPN · checked ${relativeTime(state.lastLoaded)}`
+    ? `${protectedCount} ${protectedCount === 1 ? "device goes" : "devices go"} through a VPN · checked ${relativeTime(state.lastLoaded)}`
     : `Checked ${relativeTime(state.lastLoaded)}`;
   const hero = $("#hero");
   hero.className = `hero ${tone}`;
@@ -316,7 +328,7 @@ const renderDashboard = () => {
     ["vpn", "Through VPN", counts.vpn, "devices protected"],
     ["novpn", "Without VPN", counts.direct + counts.local, `${counts.direct} direct · ${counts.local} local only`],
     ["default", "Using the default", counts.default, `${POLICY_LABELS[defaultPolicy()] || defaultPolicy()} for new devices`],
-    ["locations", "Active tunnels", limit ? `${activeExits} / ${limit}` : activeExits, "Proton connections in use"]
+    ["locations", "Active tunnels", activeExits, limit ? `${protonTunnels()} of ${limit} Proton connections in use` : "VPN tunnels running"]
   ].map(([filter, label, value, note]) => `
     <a class="stat" href="${filter === "locations" ? "#/locations" : `#/devices/${filter}`}"><span>${escapeHTML(label)}</span><strong>${escapeHTML(value)}</strong><small>${escapeHTML(note)}</small></a>`).join("");
 
@@ -333,7 +345,7 @@ const renderDashboard = () => {
   } else facts.push(["Proton", state.protonAvailable ? "Signed out" : "Service not responding", "warn"]);
   facts.push(["New devices", POLICY_LABELS[defaultPolicy()] || defaultPolicy(), ""]);
   const dns = state.status?.dns;
-  if (dns?.enabled) facts.push(["DNS", `Proton DNS on VPN · ${dns.defaultServer} otherwise`, ""]);
+  if (dns?.enabled) facts.push(["DNS", `The VPN's DNS on VPN routes · ${dns.defaultServer} otherwise`, ""]);
   const channels = [state.alerts?.settings?.telegram && "Telegram", state.alerts?.settings?.webhook && "Webhook"].filter(Boolean);
   facts.push(["Notifications", channels.length ? channels.join(" and ") : "Off", channels.length ? "" : "warn"]);
   $("#dashboard-facts").innerHTML = facts.map(([term, value, tone]) => `<dt>${escapeHTML(term)}</dt><dd class="${tone}">${escapeHTML(value)}</dd>`).join("");
@@ -416,9 +428,16 @@ const routeOptions = device => {
   }
   servers.sort((left, right) => countryName(left.country).localeCompare(countryName(right.country)) || String(left.name).localeCompare(String(right.name)));
   const option = (value, label, selected) => `<option value="${escapeHTML(value)}" ${selected ? "selected" : ""}>${escapeHTML(label)}</option>`;
+  const byProvider = new Map();
+  for (const server of servers) {
+    const provider = providerOf(server);
+    if (!byProvider.has(provider)) byProvider.set(provider, []);
+    byProvider.get(provider).push(server);
+  }
+  const groups = [...byProvider].sort(([left], [right]) => (left === "Proton VPN" ? -1 : right === "Proton VPN" ? 1 : left.localeCompare(right)));
   return [
     option("", `Default (${(POLICY_LABELS[defaultPolicy()] || defaultPolicy()).toLowerCase()})`, route.kind === "default"),
-    servers.length ? `<optgroup label="Proton VPN">${servers.map(server => option(server.id, `${flag(server.country)} ${countryName(server.country)}${server.city ? `, ${server.city}` : ""} · ${server.name}`, server.id === selectedServer)).join("")}</optgroup>` : "",
+    ...groups.map(([provider, list]) => `<optgroup label="${escapeHTML(provider)}">${list.map(server => option(server.id, `${flag(server.country)} ${countryName(server.country)}${server.city ? `, ${server.city}` : ""} · ${server.name}`, server.id === selectedServer)).join("")}</optgroup>`),
     `<optgroup label="Without VPN">${option(DIRECT, "Direct Internet", route.kind === "direct")}${option(LOCAL, "Local network only", route.kind === "local")}</optgroup>`
   ].join("");
 };
@@ -429,7 +448,7 @@ const dnsSummary = device => {
   if (routeOf(device).kind === "vpn") {
     if (dns.resolution === "blocked") return "DNS blocked while the VPN is down";
     if (dns.resolution === "server") return `DNS falls back to ${dns.server}`;
-    return `Proton DNS${dns.killSwitch ? " · kill switch on" : ""}`;
+    return `VPN DNS${dns.killSwitch ? " · kill switch on" : ""}`;
   }
   return `DNS ${dns.server}${dns.customServer ? "" : " (default)"}`;
 };
@@ -443,7 +462,7 @@ const dnsPanel = device => {
   return `
     <form class="dns-panel" data-dns-form="${id}">
       ${onVpn ? `
-        <p>Lookups go through the VPN to Proton's resolver, so websites see Proton, not you.</p>
+        <p>Lookups go through the VPN tunnel to the VPN's resolver, so websites see the VPN, not you.</p>
         <label class="check"><input type="checkbox" data-dns-kill ${dns.killSwitch ? "checked" : ""}><span>Block lookups while the VPN is down<small>Recommended. Otherwise they fall back to the server below, outside the VPN.</small></span></label>
         <div data-dns-fallback ${dns.killSwitch ? "hidden" : ""}>${serverField("Fallback DNS server")}</div>`
       : `<p>This device does not use the VPN, so its lookups go to this server.</p>${serverField("DNS server")}`}
@@ -526,7 +545,7 @@ const renderLocations = () => {
   servers.sort((left, right) => Number(exitsByServer.has(right.id)) - Number(exitsByServer.has(left.id)) || countryName(left.country).localeCompare(countryName(right.country)));
   $("#add-location").hidden = !protonSignedIn();
   if (!servers.length) {
-    grid.innerHTML = `<div class="empty">${icon("globe")}<strong>No VPN locations yet</strong><span>${protonSignedIn() ? "Add a Proton server, then choose it for your devices." : "Sign in to Proton to browse servers."}</span>${protonSignedIn() ? `<button type="button" data-open-picker>${icon("plus")}Add location</button>` : `<a class="link" href="#/settings/proton">Sign in to Proton</a>`}</div>`;
+    grid.innerHTML = `<div class="empty">${icon("globe")}<strong>No VPN locations yet</strong><span>Import a WireGuard configuration from any provider${protonSignedIn() ? ", or add a Proton server" : ", or sign in to Proton to browse its servers"}.</span><div class="actions"><button type="button" class="secondary" data-open-import>Import WireGuard</button>${protonSignedIn() ? `<button type="button" data-open-picker>${icon("plus")}Add Proton server</button>` : `<a class="link" href="#/settings/proton">Sign in to Proton</a>`}</div></div>`;
     return;
   }
   grid.innerHTML = servers.map(server => {
@@ -541,11 +560,11 @@ const renderLocations = () => {
     const features = featureList(server.features);
     return `
       <article class="location">
-        <div class="location-head"><span class="flag">${flag(server.country)}</span><span><h3>${escapeHTML(countryName(server.country))}</h3><small>${escapeHTML([server.city, server.name].filter(Boolean).join(" · "))}</small></span><span class="badge ${health.tone}">${health.label}</span></div>
+        <div class="location-head"><span class="flag">${flag(server.country)}</span><span><span class="provider">${escapeHTML(providerOf(server))}</span><h3>${escapeHTML(countryName(server.country))}</h3><small>${escapeHTML([server.city, server.name].filter(Boolean).join(" · "))}</small></span><span class="badge ${health.tone}">${health.label}</span></div>
         ${features.length ? `<div class="chips">${features.map(feature => `<span class="tag">${escapeHTML(feature)}</span>`).join("")}</div>` : ""}
         <dl class="facts">${facts.map(([term, value]) => `<dt>${escapeHTML(term)}</dt><dd>${escapeHTML(value)}</dd>`).join("")}</dl>
         ${exit?.status === "failed" || exit?.status === "degraded" ? `<p class="location-detail">${escapeHTML(exit.statusDetail || "The tunnel is not passing traffic.")}</p>` : ""}
-        ${exit && !users.length ? `<div class="actions"><button type="button" class="small danger-outline" data-stop-exit="${escapeHTML(exit.id)}">Stop tunnel</button></div>` : ""}
+        ${!users.length && (exit || server.source === "custom") ? `<div class="actions">${exit ? `<button type="button" class="small secondary" data-stop-exit="${escapeHTML(exit.id)}">Stop tunnel</button>` : ""}${server.source === "custom" ? `<button type="button" class="small danger-outline" data-remove-custom="${escapeHTML(server.id)}" data-name="${escapeHTML(server.name)}">Remove</button>` : ""}</div>` : ""}
       </article>`;
   }).join("");
 };
@@ -628,6 +647,66 @@ const openPicker = async () => {
     $("#location-body").innerHTML = `<div class="empty"><strong>Could not load Proton servers</strong><span>${escapeHTML(error.message)}</span></div>`;
   }
 };
+
+/* Import a WireGuard configuration */
+
+const fillCountries = () => {
+  const select = $("#import-country");
+  if (select.options.length) return;
+  const countries = COUNTRY_CODES.map(code => [code, countryName(code)]).sort(([, left], [, right]) => left.localeCompare(right));
+  select.innerHTML = `<option value="">Choose…</option>${countries.map(([code, name]) => `<option value="${code}">${flag(code)} ${escapeHTML(name)}</option>`).join("")}`;
+};
+
+const openImport = () => {
+  fillCountries();
+  $("#import-form").reset();
+  $("#import-dialog").showModal();
+  $("#import-file").focus();
+};
+
+// Suggest a provider, country and name from a file name like "mullvad-ch-zrh-wg-001.conf".
+const guessFromFileName = fileName => {
+  const base = fileName.replace(/\.conf$/i, "");
+  const words = base.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
+  const provider = Object.entries(PROVIDER_HINTS).find(([hint]) => words.some(word => word.startsWith(hint)))?.[1] || "";
+  const country = words.map(word => word.toUpperCase()).find(word => word.length === 2 && COUNTRY_CODES.includes(word)) || "";
+  return { name: base.slice(0, 48), provider, country };
+};
+
+$("#import-location").addEventListener("click", openImport);
+$("#import-close").addEventListener("click", () => $("#import-dialog").close());
+$("#import-cancel").addEventListener("click", () => $("#import-dialog").close());
+$("#import-file").addEventListener("change", async event => {
+  const file = event.target.files[0];
+  if (!file) return;
+  if (file.size > 16384) return toast("That file is too large to be a WireGuard configuration.", "bad");
+  $("#import-config").value = await file.text();
+  const guess = guessFromFileName(file.name);
+  if (!$("#import-name").value) $("#import-name").value = guess.name;
+  if (!$("#import-provider").value) $("#import-provider").value = guess.provider;
+  if (!$("#import-country").value && guess.country) $("#import-country").value = guess.country;
+});
+$("#import-form").addEventListener("submit", async event => {
+  event.preventDefault();
+  const button = $("#import-submit");
+  await busy(button, async () => {
+    try {
+      const { server } = await api("/v1/custom-exits", { method: "POST", body: JSON.stringify({
+        name: $("#import-name").value.trim(),
+        provider: $("#import-provider").value.trim(),
+        country: $("#import-country").value,
+        city: $("#import-city").value.trim(),
+        config: $("#import-config").value
+      }) });
+      $("#import-config").value = "";
+      $("#import-dialog").close();
+      toast(`${flag(server.country)} ${server.name} (${server.provider}) imported. Choose it for a device on the Devices page.`);
+      await load();
+    } catch (error) { toast(error.message, "bad"); }
+  });
+});
+// Never keep a pasted private key around after the dialog closes.
+$("#import-dialog").addEventListener("close", () => { $("#import-config").value = ""; $("#import-file").value = ""; });
 
 /* Settings */
 
@@ -877,6 +956,20 @@ $("#missing-devices").addEventListener("click", async event => {
 $("#add-location").addEventListener("click", openPicker);
 $("#location-grid").addEventListener("click", async event => {
   if (event.target.closest("[data-open-picker]")) return openPicker();
+  if (event.target.closest("[data-open-import]")) return openImport();
+  const remove = event.target.closest("[data-remove-custom]");
+  if (remove) {
+    const ok = await confirmDialog({ title: `Remove ${remove.dataset.name}?`, text: "Its configuration, including the private key, is deleted from the gateway. You can import it again later.", confirm: "Remove", danger: true });
+    if (!ok) return;
+    await busy(remove, async () => {
+      try {
+        await mutate(`/v1/custom-exits/${encodeURIComponent(remove.dataset.removeCustom)}`, "DELETE");
+        toast(`${remove.dataset.name} removed.`);
+      } catch (error) { toast(error.message, "bad"); }
+    });
+    await load();
+    return;
+  }
   const stop = event.target.closest("[data-stop-exit]");
   if (!stop) return;
   const ok = await confirmDialog({ title: "Stop this tunnel?", text: "No devices use it. It starts again when a device picks this location.", confirm: "Stop tunnel", danger: true });

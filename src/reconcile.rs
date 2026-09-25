@@ -253,7 +253,10 @@ impl Reconciler {
                     .await
                 {
                     Err(error) => failed(format!("{error:#}")),
-                    Ok(()) => self.check_tunnel(&mut runtime, &wanted).await,
+                    Ok(resolver) => {
+                        wanted.resolver = resolver;
+                        self.check_tunnel(&mut runtime, &wanted).await
+                    }
                 },
             };
             runtime_exits.push(wanted);
@@ -334,8 +337,9 @@ impl Reconciler {
         runtime: &mut Runtime,
         exit: &Exit,
         config_path: &str,
-    ) -> Result<()> {
+    ) -> Result<Option<Ipv4Addr>> {
         let configuration = wireguard::parse_file(config_path)?;
+        let resolver = configuration.dns.first().copied();
         let mut hasher = Sha256::new();
         hasher.update(configuration.set_conf.as_bytes());
         for (address, prefix) in &configuration.addresses {
@@ -348,14 +352,14 @@ impl Reconciler {
         let fingerprint: [u8; 32] = hasher.finalize().into();
         if runtime.tunnels.get(&exit.id) == Some(&fingerprint) {
             if self.config.dry_run || self.interface_up(&exit.interface).await {
-                return Ok(());
+                return Ok(resolver);
             }
             warn!(exit = %exit.id, interface = %exit.interface, "tunnel interface missing or down; recreating");
         }
         if self.config.dry_run {
             runtime.tunnels.insert(exit.id.clone(), fingerprint);
             runtime.created.insert(exit.id.clone(), Instant::now());
-            return Ok(());
+            return Ok(resolver);
         }
         fs::create_dir_all(&self.config.runtime_directory)?;
         let set_conf_path = self
@@ -435,7 +439,7 @@ impl Reconciler {
         result?;
         runtime.tunnels.insert(exit.id.clone(), fingerprint);
         runtime.created.insert(exit.id.clone(), Instant::now());
-        Ok(())
+        Ok(resolver)
     }
 
     async fn run_commands(&self, commands: Vec<Vec<String>>, interface: &str) -> Result<()> {
@@ -524,8 +528,8 @@ impl Reconciler {
         let mut probes = tokio::task::JoinSet::new();
         for (index, (exit, verdict)) in exits.iter().zip(verdicts.iter()).enumerate() {
             if policy::routable(&verdict.status) {
-                let mark = exit.mark;
-                probes.spawn(async move { (index, probe::run(mark).await) });
+                let (mark, resolver) = (exit.mark, exit.resolver);
+                probes.spawn(async move { (index, probe::run(mark, resolver).await) });
             }
         }
         while let Some(result) = probes.join_next().await {
@@ -626,7 +630,7 @@ fn assess_probe(verdict: Verdict, state: &mut ProbeState, outcome: probe::Outcom
             return Verdict {
                 status: ExitStatus::Failed,
                 detail: format!(
-                    "handshakes succeed but no traffic passes ({failures} probes failed: {error}); the Proton certificate or session may be invalid"
+                    "handshakes succeed but no traffic passes ({failures} probes failed: {error}); the VPN key, its certificate, or the account may no longer be valid"
                 ),
                 rebuild: verdict.rebuild
                     || (failures - PROBE_FAILURE_LIMIT) % PROBE_REBUILD_EVERY == 0,
@@ -643,10 +647,7 @@ fn assess_probe(verdict: Verdict, state: &mut ProbeState, outcome: probe::Outcom
             if state.resolver_failures < PROBE_FAILURE_LIMIT {
                 return verdict;
             }
-            degrade(
-                verdict,
-                format!("Proton DNS resolver not answering: {error}"),
-            )
+            degrade(verdict, format!("VPN DNS resolver not answering: {error}"))
         }
     }
 }
@@ -910,19 +911,19 @@ mod tests {
     }
 
     #[test]
-    fn a_silent_proton_resolver_degrades_the_exit() {
+    fn a_silent_tunnel_resolver_degrades_the_exit() {
         let address = Ipv4Addr::new(146, 70, 86, 115);
         let mut state = ProbeState::default();
         let once = assess_probe(healthy(), &mut state, outcome(Ok(address), Err("timeout")));
         assert_eq!(once.status, ExitStatus::Healthy);
         let twice = assess_probe(healthy(), &mut state, outcome(Ok(address), Err("timeout")));
         assert_eq!(twice.status, ExitStatus::Degraded);
-        assert!(twice.detail.contains("Proton DNS resolver"));
+        assert!(twice.detail.contains("VPN DNS resolver"));
         assert!(!twice.rebuild);
         let degraded = classify(Some(Duration::from_secs(240)), Duration::from_secs(600));
         let combined = assess_probe(degraded, &mut state, outcome(Ok(address), Err("timeout")));
         assert!(combined.detail.starts_with("last handshake"));
-        assert!(combined.detail.contains("; Proton DNS resolver"));
+        assert!(combined.detail.contains("; VPN DNS resolver"));
     }
 
     #[test]

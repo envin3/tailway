@@ -74,6 +74,9 @@ pub struct Exit {
     pub status_detail: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub public_ip: String,
+    /// In-tunnel resolver from the tunnel's `DNS =` line, known at runtime.
+    #[serde(skip)]
+    pub resolver: Option<Ipv4Addr>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -117,6 +120,12 @@ pub struct NodeDns {
 #[serde(rename_all = "camelCase")]
 pub struct Server {
     pub id: String,
+    /// Where the server comes from: the Proton account, or an imported config.
+    #[serde(default)]
+    pub source: ServerSource,
+    /// Provider shown to people ("Proton VPN", "Mullvad", …).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub provider: String,
     pub country: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub city: String,
@@ -127,6 +136,16 @@ pub struct Server {
     pub features: Vec<String>,
     #[serde(skip)]
     pub config_file: String,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ServerSource {
+    /// Managed through the Proton account broker (counts toward its connection limit).
+    #[default]
+    Proton,
+    /// A WireGuard configuration imported by hand, from any provider.
+    Custom,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

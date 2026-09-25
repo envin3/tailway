@@ -1,10 +1,11 @@
 //! Per-device DNS for tailnet clients.
 //!
 //! When the tailnet's DNS server is this gateway, every client's lookups arrive
-//! here with the client's own tailnet address. Devices routed through a Proton
-//! exit are answered by that exit's resolver through the same tunnel; every other
-//! device uses its configured DNS server. A Proton device whose tunnel is down
-//! gets SERVFAIL unless its kill switch is off.
+//! here with the client's own tailnet address. Devices routed through a VPN
+//! exit are answered through the same tunnel, by the resolver its configuration
+//! names (`DNS =`) or else by the device's own server; every other device uses
+//! its configured DNS server directly. A VPN device whose tunnel is down gets
+//! SERVFAIL unless its kill switch is off.
 
 use std::collections::HashMap;
 use std::io;
@@ -22,7 +23,7 @@ use tracing::warn;
 use crate::domain::{Assignment, Device, Exit, NodeDns, is_builtin_route};
 use crate::policy::routable;
 
-/// Proton's resolver, reachable only inside a Proton tunnel.
+/// Proton's resolver, reachable only inside a Proton tunnel (its profiles name it).
 pub const PROTON_RESOLVER: Ipv4Addr = Ipv4Addr::new(10, 2, 0, 1);
 const DNS_PORT: u16 = 53;
 const UPSTREAM_TIMEOUT: Duration = Duration::from_secs(3);
@@ -41,7 +42,7 @@ pub struct Defaults {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Upstream {
     pub address: SocketAddrV4,
-    /// Routing mark selecting a Proton tunnel; `None` uses the gateway's own route.
+    /// Routing mark selecting a VPN tunnel; `None` uses the gateway's own route.
     pub mark: Option<u32>,
 }
 
@@ -56,27 +57,27 @@ impl Upstream {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Resolution {
-    /// Through the device's own Proton tunnel. `fallback` is set only when the
+    /// Through the device's own VPN tunnel. `fallback` is set only when the
     /// kill switch is off and is used if the tunnel resolver does not answer.
-    Proton {
+    Tunnel {
         exit_id: String,
         upstream: Upstream,
         fallback: Option<Upstream>,
     },
-    /// The device's Proton exit is unavailable and its kill switch is on.
+    /// The device's VPN exit is unavailable and its kill switch is on.
     Blocked {
         exit_id: String,
     },
     Server(Upstream),
     /// No plan has been published yet (agent starting): nobody is known, so
-    /// fail closed rather than send a Proton device's lookups over the WAN.
+    /// fail closed rather than send a VPN device's lookups over the WAN.
     NotReady,
 }
 
 impl Resolution {
     pub fn kind(&self) -> &'static str {
         match self {
-            Resolution::Proton { .. } => "proton",
+            Resolution::Tunnel { .. } => "tunnel",
             Resolution::Blocked { .. } => "blocked",
             Resolution::Server(_) => "server",
             Resolution::NotReady => "starting",
@@ -130,10 +131,12 @@ pub fn plan(input: PlanInput<'_>) -> HashMap<Ipv4Addr, Resolution> {
         let home = Upstream::server(server);
         let resolution = match assignments.get(device.node_id.as_str()) {
             Some(exit_id) if !is_builtin_route(exit_id) => match exits.get(exit_id) {
-                Some(exit) if routable(&exit.status) => Resolution::Proton {
+                Some(exit) if routable(&exit.status) => Resolution::Tunnel {
                     exit_id: (*exit_id).to_owned(),
+                    // The tunnel's own resolver, else the device's server,
+                    // either way inside the tunnel.
                     upstream: Upstream {
-                        address: SocketAddrV4::new(PROTON_RESOLVER, DNS_PORT),
+                        address: SocketAddrV4::new(exit.resolver.unwrap_or(server), DNS_PORT),
                         mark: Some(exit.mark),
                     },
                     fallback: (!kill_switch).then_some(home),
@@ -343,7 +346,7 @@ async fn answer(
             .ok()
             .or_else(|| error_response(query, SERVFAIL)),
         Resolution::Blocked { .. } | Resolution::NotReady => error_response(query, SERVFAIL),
-        Resolution::Proton {
+        Resolution::Tunnel {
             upstream, fallback, ..
         } => match exchange(upstream, query, transport).await {
             Ok(response) => Some(response),
@@ -475,6 +478,7 @@ mod tests {
             id: id.into(),
             mark,
             status,
+            resolver: Some(PROTON_RESOLVER),
             ..Exit::default()
         }
     }
@@ -537,7 +541,7 @@ mod tests {
         });
         assert_eq!(
             plan[&address(10)],
-            Resolution::Proton {
+            Resolution::Tunnel {
                 exit_id: "exit-nl".into(),
                 upstream: Upstream {
                     address: SocketAddrV4::new(PROTON_RESOLVER, 53),
@@ -569,7 +573,7 @@ mod tests {
     }
 
     #[test]
-    fn kill_switch_off_adds_a_fallback_for_healthy_proton_exits() {
+    fn kill_switch_off_adds_a_fallback_for_healthy_vpn_exits() {
         let devices = vec![device("vpn", 10)];
         let assignments = vec![assign("vpn", "exit-nl")];
         let exits = vec![exit("exit-nl", 0x100, ExitStatus::Degraded)];
@@ -581,10 +585,39 @@ mod tests {
             settings: &settings,
             defaults: DEFAULTS,
         });
-        let Resolution::Proton { fallback, .. } = &plan[&address(10)] else {
-            panic!("expected Proton resolution");
+        let Resolution::Tunnel { fallback, .. } = &plan[&address(10)] else {
+            panic!("expected tunnel resolution");
         };
         assert_eq!(*fallback, Some(Upstream::server(DEFAULTS.server)));
+    }
+
+    #[test]
+    fn a_tunnel_without_its_own_resolver_carries_the_device_server() {
+        let devices = vec![device("vpn", 10)];
+        let assignments = vec![assign("vpn", "exit-home")];
+        let exits = vec![Exit {
+            resolver: None,
+            ..exit("exit-home", 0x300, ExitStatus::Healthy)
+        }];
+        let custom = Ipv4Addr::new(1, 1, 1, 1);
+        let settings = vec![setting("vpn", None, Some(custom))];
+        let plan = plan(PlanInput {
+            devices: &devices,
+            assignments: &assignments,
+            exits: &exits,
+            settings: &settings,
+            defaults: DEFAULTS,
+        });
+        let Resolution::Tunnel { upstream, .. } = &plan[&address(10)] else {
+            panic!("expected tunnel resolution");
+        };
+        assert_eq!(
+            *upstream,
+            Upstream {
+                address: SocketAddrV4::new(custom, 53),
+                mark: Some(0x300)
+            }
+        );
     }
 
     #[test]
@@ -763,7 +796,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn failed_proton_resolver_uses_fallback_only_without_kill_switch() {
+    async fn failed_tunnel_resolver_uses_fallback_only_without_kill_switch() {
         let fallback = fake_udp_upstream().await;
         let dead_tunnel = Upstream {
             address: closed_port(),
@@ -772,7 +805,7 @@ mod tests {
         let with_fallback = start(
             HashMap::from([(
                 loopback(),
-                Resolution::Proton {
+                Resolution::Tunnel {
                     exit_id: "exit-nl".into(),
                     upstream: dead_tunnel,
                     fallback: Some(Upstream {
@@ -794,7 +827,7 @@ mod tests {
         let without_fallback = start(
             HashMap::from([(
                 loopback(),
-                Resolution::Proton {
+                Resolution::Tunnel {
                     exit_id: "exit-nl".into(),
                     upstream: dead_tunnel,
                     fallback: None,

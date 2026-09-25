@@ -9,6 +9,7 @@ use anyhow::{Context, Result};
 use tailway::alert::{self, Alerts};
 use tailway::catalog::StaticCatalog;
 use tailway::control::Api;
+use tailway::custom::CustomExits;
 use tailway::dns::{self, DnsServer};
 use tailway::domain::{ExitStatus, UnassignedPolicy};
 use tailway::notify::{self, Notifier, SettingsStore};
@@ -33,10 +34,17 @@ async fn main() -> Result<()> {
         "STATE_PATH",
         "/var/lib/tailway/desired.json",
     )));
-    let catalog = Arc::new(StaticCatalog::new(
-        environment("CATALOG_PATH", "/etc/tailway/catalog.json"),
-        environment("SECRETS_DIRECTORY", "/run/secrets/proton"),
-    ));
+    let catalog = Arc::new(
+        StaticCatalog::new(
+            environment("CATALOG_PATH", "/etc/tailway/catalog.json"),
+            environment("SECRETS_DIRECTORY", "/run/secrets/proton"),
+        )
+        // WireGuard configurations imported in the console, from any provider.
+        .with_custom(CustomExits::new(environment(
+            "CUSTOM_EXITS_DIRECTORY",
+            "/var/lib/tailway/custom-exits",
+        ))),
+    );
     let (alerts, notifier) = start_alerts()?;
     let devices = Arc::new(Provider::new(runner.clone()));
     let reconciler = Arc::new(Reconciler::new(

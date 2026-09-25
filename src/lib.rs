@@ -2,6 +2,7 @@ pub mod account;
 pub mod alert;
 pub mod catalog;
 pub mod control;
+pub mod custom;
 pub mod dns;
 pub mod domain;
 pub mod mail;

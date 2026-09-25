@@ -65,8 +65,11 @@
 
         <section class="view" data-view="locations">
           <div class="section-head">
-            <p class="lead">Proton VPN servers your devices can use. A tunnel starts when the first device picks a location and stops when the last one leaves.</p>
-            <button id="add-location" type="button"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M11 5h2v6h6v2h-6v6h-2v-6H5v-2h6V5Z"/></svg>Add location</button>
+            <p class="lead">VPN servers your devices can use: Proton servers, or any provider's WireGuard configuration. A tunnel starts when the first device picks a location and stops when the last one leaves.</p>
+            <div class="actions">
+              <button id="import-location" type="button" class="secondary"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M11 4h2v8.2l3.6-3.6L18 10l-6 6-6-6 1.4-1.4 3.6 3.6V4ZM5 18h14v2H5v-2Z"/></svg>Import WireGuard</button>
+              <button id="add-location" type="button"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M11 5h2v6h6v2h-6v6h-2v-6H5v-2h6V5Z"/></svg>Add Proton server</button>
+            </div>
           </div>
           <div class="location-grid" id="location-grid"></div>
         </section>
@@ -180,6 +183,30 @@
       </div>
     </div>
     <div class="sheet-body" id="location-body"></div>
+  </dialog>
+
+  <dialog id="import-dialog" class="sheet import-sheet" aria-labelledby="import-title">
+    <form id="import-form" class="import-form">
+      <header class="sheet-header">
+        <h2 id="import-title">Import a WireGuard configuration</h2>
+        <button type="button" class="icon-button" id="import-close" aria-label="Close"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m18.3 5.7-1.4-1.4L12 9.2 7.1 4.3 5.7 5.7l4.9 4.9-4.9 4.9 1.4 1.4 4.9-4.9 4.9 4.9 1.4-1.4-4.9-4.9 4.9-4.9Z"/></svg></button>
+      </header>
+      <div class="sheet-body form">
+        <p class="muted">Use a <code>.conf</code> file from any WireGuard VPN (Mullvad, IVPN, AirVPN, Windscribe…) or your own server. It must send all traffic through the tunnel. The private key stays on the gateway and is never shown again.</p>
+        <label class="field"><span>Configuration file</span><input id="import-file" type="file" accept=".conf,text/plain"></label>
+        <label class="field"><span>Or paste it</span><textarea id="import-config" rows="7" spellcheck="false" autocomplete="off" placeholder="[Interface]&#10;PrivateKey = …&#10;Address = …&#10;DNS = …&#10;&#10;[Peer]&#10;PublicKey = …&#10;AllowedIPs = 0.0.0.0/0&#10;Endpoint = …" required></textarea></label>
+        <div class="field-row even">
+          <label class="field"><span>Name</span><input id="import-name" maxlength="48" required placeholder="Zurich"></label>
+          <label class="field"><span>Provider <em>optional</em></span><input id="import-provider" maxlength="32" list="provider-suggestions" placeholder="WireGuard"></label>
+        </div>
+        <datalist id="provider-suggestions"><option value="Mullvad"></option><option value="IVPN"></option><option value="AirVPN"></option><option value="Windscribe"></option><option value="NordVPN"></option><option value="Surfshark"></option><option value="Own server"></option></datalist>
+        <div class="field-row even">
+          <label class="field"><span>Country</span><select id="import-country" required></select></label>
+          <label class="field"><span>City <em>optional</em></span><input id="import-city" maxlength="48"></label>
+        </div>
+      </div>
+      <footer class="sheet-footer actions end"><button type="button" class="secondary" id="import-cancel">Cancel</button><button id="import-submit">Import</button></footer>
+    </form>
   </dialog>
 
   <dialog id="confirm-dialog" class="confirm" aria-labelledby="confirm-title">

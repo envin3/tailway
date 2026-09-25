@@ -5,11 +5,15 @@ use std::path::{Component, Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
-use crate::domain::{SCHEMA_VERSION, Server};
+use crate::custom::CustomExits;
+use crate::domain::{SCHEMA_VERSION, Server, ServerSource};
 
+/// Servers the router can use: the Proton catalog kept by the account broker,
+/// plus WireGuard configurations imported by hand.
 pub struct StaticCatalog {
     catalog_path: PathBuf,
     secrets_root: PathBuf,
+    custom: Option<CustomExits>,
 }
 
 #[derive(Deserialize)]
@@ -37,11 +41,44 @@ impl StaticCatalog {
         Self {
             catalog_path: catalog_path.into(),
             secrets_root: secrets_root.into(),
+            custom: None,
         }
     }
 
+    pub fn with_custom(mut self, custom: CustomExits) -> Self {
+        self.custom = Some(custom);
+        self
+    }
+
+    pub fn custom(&self) -> Option<&CustomExits> {
+        self.custom.as_ref()
+    }
+
     pub fn list(&self) -> Result<Vec<Server>> {
-        let content = fs::read(&self.catalog_path).context("read static catalog")?;
+        let mut servers = self.list_proton()?;
+        if let Some(custom) = &self.custom {
+            servers.extend(custom.list()?);
+        }
+        let mut seen = HashSet::new();
+        for server in &servers {
+            if !seen.insert(server.id.clone()) {
+                bail!("duplicate server ID {:?}", server.id);
+            }
+        }
+        servers.sort_by(|left, right| left.id.cmp(&right.id));
+        Ok(servers)
+    }
+
+    fn list_proton(&self) -> Result<Vec<Server>> {
+        // No Proton catalog yet (nothing imported through the broker) is fine
+        // when there are imported WireGuard configurations.
+        let content = match fs::read(&self.catalog_path) {
+            Ok(content) => content,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound && self.custom.is_some() => {
+                return Ok(Vec::new());
+            }
+            Err(error) => return Err(error).context("read static catalog"),
+        };
         let catalog: CatalogFile =
             serde_json::from_slice(&content).context("decode static catalog")?;
         if catalog.schema_version != SCHEMA_VERSION {
@@ -70,6 +107,8 @@ impl StaticCatalog {
             }
             servers.push(Server {
                 id: server.id,
+                source: ServerSource::Proton,
+                provider: "Proton VPN".into(),
                 country: server.country,
                 city: server.city,
                 name: server.name,
@@ -82,7 +121,6 @@ impl StaticCatalog {
                     .into_owned(),
             });
         }
-        servers.sort_by(|left, right| left.id.cmp(&right.id));
         Ok(servers)
     }
 
@@ -101,6 +139,36 @@ impl StaticCatalog {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lists_imported_configurations_without_a_proton_catalog() {
+        let directory = tempfile::tempdir().unwrap();
+        let custom = CustomExits::new(directory.path().join("custom"));
+        let imported = custom
+            .add(crate::custom::Import {
+                name: "Home".into(),
+                provider: String::new(),
+                country: "IT".into(),
+                city: String::new(),
+                config: "[Interface]\nPrivateKey = k\nAddress = 10.9.0.2/32\n[Peer]\nPublicKey = p\nAllowedIPs = 0.0.0.0/0\nEndpoint = 1.2.3.4:51820\n".into(),
+            })
+            .unwrap();
+        let catalog = StaticCatalog::new(directory.path().join("missing.json"), directory.path())
+            .with_custom(custom);
+        let servers = catalog.list().unwrap();
+        assert_eq!(servers.len(), 1);
+        assert_eq!(servers[0].source, ServerSource::Custom);
+        assert_eq!(
+            catalog.resolve(&imported.id).unwrap().config_file,
+            imported.config_file
+        );
+        // Without imports, a missing Proton catalog is still an error.
+        assert!(
+            StaticCatalog::new(directory.path().join("missing.json"), directory.path())
+                .list()
+                .is_err()
+        );
+    }
 
     #[test]
     fn rejects_path_traversal() {

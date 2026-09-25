@@ -1,10 +1,10 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post, put};
+use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
 use rand::RngCore;
 use serde::Deserialize;
@@ -14,7 +14,8 @@ use crate::alert::{Alerts, Notification};
 use crate::catalog::StaticCatalog;
 use crate::dns;
 use crate::domain::{
-    Assignment, DesiredState, Exit, ExitStatus, NodeDns, SCHEMA_VERSION, Server, is_builtin_route,
+    Assignment, DesiredState, Exit, ExitStatus, NodeDns, SCHEMA_VERSION, Server, ServerSource,
+    is_builtin_route,
 };
 use crate::notify::{self, Notifier, Settings, Telegram, Webhook};
 use crate::proton::AccountLimits;
@@ -129,6 +130,8 @@ impl Api {
                 put(route_device).delete(disable_route),
             )
             .route("/v1/dns/{node_id}", put(set_dns).delete(reset_dns))
+            .route("/v1/custom-exits", post(import_custom_exit))
+            .route("/v1/custom-exits/{server_id}", delete(remove_custom_exit))
             .route("/v1/alerts", get(get_alerts).put(put_alerts))
             .route("/v1/alerts/test", post(test_alerts))
             .route("/v1/alerts/telegram/chats", post(telegram_chats))
@@ -164,7 +167,6 @@ async fn get_status(State(api): State<Arc<Api>>) -> Response {
                     "enabled": true,
                     "defaultServer": defaults.server.to_string(),
                     "killSwitchDefault": defaults.kill_switch,
-                    "protonResolver": dns::PROTON_RESOLVER.to_string(),
                 })
             }).unwrap_or_else(|| json!({"enabled": false})),
         }),
@@ -246,6 +248,66 @@ async fn get_catalog(State(api): State<Arc<Api>>) -> Response {
     }
 }
 
+async fn import_custom_exit(
+    State(api): State<Arc<Api>>,
+    Json(import): Json<crate::custom::Import>,
+) -> Response {
+    let Some(custom) = api.catalog.custom() else {
+        return error_response(
+            StatusCode::NOT_IMPLEMENTED,
+            "importing configurations is not enabled",
+        );
+    };
+    match custom.add(import) {
+        Ok(server) => {
+            tracing::info!(server = %server.id, provider = %server.provider, country = %server.country, "WireGuard configuration imported");
+            json_response(StatusCode::CREATED, json!({"server": server}))
+        }
+        Err(error) => error_response(StatusCode::BAD_REQUEST, format!("{error:#}")),
+    }
+}
+
+/// Removes an imported location. Refused while devices use it; a tunnel that
+/// no device uses is stopped first.
+async fn remove_custom_exit(
+    State(api): State<Arc<Api>>,
+    Path(server_id): Path<String>,
+    Json(input): Json<MutationRequest>,
+) -> Response {
+    let Some(custom) = api.catalog.custom() else {
+        return error_response(
+            StatusCode::NOT_IMPLEMENTED,
+            "importing configurations is not enabled",
+        );
+    };
+    if !custom.contains(&server_id) {
+        return error_response(StatusCode::NOT_FOUND, "unknown imported location");
+    }
+    let result = api.store.update(input.revision, |desired| {
+        let exit_ids: HashSet<String> = desired
+            .exits
+            .iter()
+            .filter(|exit| exit.server_id == server_id)
+            .map(|exit| exit.id.clone())
+            .collect();
+        if desired
+            .assignments
+            .iter()
+            .any(|assignment| exit_ids.contains(&assignment.exit_id))
+        {
+            anyhow::bail!("devices still use this location; choose another route for them first");
+        }
+        desired.exits.retain(|exit| !exit_ids.contains(&exit.id));
+        Ok(())
+    });
+    if result.is_ok()
+        && let Err(error) = custom.remove(&server_id)
+    {
+        return error_response(StatusCode::INTERNAL_SERVER_ERROR, format!("{error:#}"));
+    }
+    finish_mutation(api, result).await
+}
+
 async fn get_exits(State(api): State<Arc<Api>>) -> Response {
     let mut desired = match api.store.load() {
         Ok(desired) => desired,
@@ -287,8 +349,10 @@ async fn create_exit(
     let mut random = [0_u8; 8];
     rand::rng().fill_bytes(&mut random);
     let exit_id = format!("exit-{}", hex::encode(random));
+    let custom_servers = custom_server_ids(&api);
+    let limit = proton_limit(&server, exit_limit, &custom_servers);
     let result = api.store.update(input.revision, |desired| {
-        enforce_exit_limit(desired.exits.len(), exit_limit)?;
+        enforce_exit_limit(desired, limit)?;
         desired.exits.push(Exit {
             id: exit_id,
             display_name: input.display_name,
@@ -419,13 +483,15 @@ async fn route_device(
         Ok(exit_limit) => exit_limit,
         Err(error) => return error_response(StatusCode::SERVICE_UNAVAILABLE, error),
     };
+    let custom_servers = custom_server_ids(&api);
     let result = api.store.update(input.revision, |desired| {
         if is_builtin_route(&input.server_id) {
             set_assignment(desired, &node_id, &input.server_id);
             Ok(())
         } else {
             let server = api.catalog.resolve(&input.server_id)?;
-            route_node_to_server(desired, &node_id, &server, &new_exit_id, exit_limit)
+            let limit = proton_limit(&server, exit_limit, &custom_servers);
+            route_node_to_server(desired, &node_id, &server, &new_exit_id, limit)
         }
     });
     finish_mutation(api, result).await
@@ -552,7 +618,7 @@ fn route_node_to_server(
     node_id: &str,
     server: &Server,
     new_exit_id: &str,
-    exit_limit: Option<usize>,
+    exit_limit: Option<ProtonLimit<'_>>,
 ) -> anyhow::Result<()> {
     let previous_exit_id = desired
         .assignments
@@ -577,7 +643,7 @@ fn route_node_to_server(
                 (!shared).then_some(exit_id.clone())
             });
         if replaceable.is_none() {
-            enforce_exit_limit(desired.exits.len(), exit_limit)?;
+            enforce_exit_limit(desired, exit_limit)?;
         }
         let exit_id = replaceable.unwrap_or_else(|| new_exit_id.to_owned());
         let replacement = Exit {
@@ -612,13 +678,57 @@ fn route_node_to_server(
     Ok(())
 }
 
-fn enforce_exit_limit(active_exits: usize, exit_limit: Option<usize>) -> anyhow::Result<()> {
-    if let Some(exit_limit) = exit_limit
-        && active_exits >= exit_limit
-    {
-        anyhow::bail!("Proton account connection limit reached ({active_exits}/{exit_limit})");
+/// Proton's connection limit. Imported WireGuard tunnels do not count toward it.
+#[derive(Clone, Copy)]
+struct ProtonLimit<'a> {
+    max: usize,
+    custom_servers: &'a HashSet<String>,
+}
+
+/// The limit that applies when adding a tunnel to `server`: none for imported ones.
+fn proton_limit<'a>(
+    server: &Server,
+    exit_limit: Option<usize>,
+    custom_servers: &'a HashSet<String>,
+) -> Option<ProtonLimit<'a>> {
+    match (server.source, exit_limit) {
+        (ServerSource::Proton, Some(max)) => Some(ProtonLimit {
+            max,
+            custom_servers,
+        }),
+        _ => None,
+    }
+}
+
+fn enforce_exit_limit(
+    desired: &DesiredState,
+    limit: Option<ProtonLimit<'_>>,
+) -> anyhow::Result<()> {
+    let Some(limit) = limit else {
+        return Ok(());
+    };
+    let active = desired
+        .exits
+        .iter()
+        .filter(|exit| !limit.custom_servers.contains(&exit.server_id))
+        .count();
+    if active >= limit.max {
+        anyhow::bail!(
+            "Proton account connection limit reached ({active}/{})",
+            limit.max
+        );
     }
     Ok(())
+}
+
+fn custom_server_ids(api: &Api) -> HashSet<String> {
+    api.catalog
+        .custom()
+        .and_then(|custom| custom.list().ok())
+        .unwrap_or_default()
+        .into_iter()
+        .map(|server| server.id)
+        .collect()
 }
 
 fn disable_node_route(desired: &mut DesiredState, node_id: &str) {
@@ -882,6 +992,8 @@ mod tests {
     fn server(id: &str) -> Server {
         Server {
             id: id.into(),
+            source: ServerSource::Proton,
+            provider: "Proton VPN".into(),
             country: "CH".into(),
             city: "Zurich".into(),
             name: id.into(),
@@ -987,12 +1099,51 @@ mod tests {
     #[test]
     fn proton_quota_blocks_only_a_new_distinct_exit() {
         let mut desired = DesiredState::default();
-        route_node_to_server(&mut desired, "node-a", &server("ch-1"), "exit-ch", Some(1)).unwrap();
-        route_node_to_server(&mut desired, "node-b", &server("ch-1"), "unused", Some(1)).unwrap();
-        let error =
-            route_node_to_server(&mut desired, "node-c", &server("us-1"), "exit-us", Some(1))
-                .unwrap_err();
+        let none = HashSet::new();
+        let limit = proton_limit(&server("ch-1"), Some(1), &none);
+        route_node_to_server(&mut desired, "node-a", &server("ch-1"), "exit-ch", limit).unwrap();
+        route_node_to_server(&mut desired, "node-b", &server("ch-1"), "unused", limit).unwrap();
+        let error = route_node_to_server(&mut desired, "node-c", &server("us-1"), "exit-us", limit)
+            .unwrap_err();
         assert!(error.to_string().contains("connection limit reached (1/1)"));
         assert_eq!(desired.exits.len(), 1);
+    }
+
+    #[test]
+    fn imported_tunnels_neither_count_nor_are_limited() {
+        let mut desired = DesiredState::default();
+        let custom = HashSet::from(["custom-aaaaaaaaaaaa".to_owned()]);
+        let mut home = server("custom-aaaaaaaaaaaa");
+        home.source = ServerSource::Custom;
+        // An imported tunnel is not limited even when Proton is full...
+        assert!(proton_limit(&home, Some(1), &custom).is_none());
+        route_node_to_server(
+            &mut desired,
+            "node-a",
+            &home,
+            "exit-home",
+            proton_limit(&home, Some(1), &custom),
+        )
+        .unwrap();
+        // ...and does not use up a Proton connection.
+        let proton = server("ch-1");
+        route_node_to_server(
+            &mut desired,
+            "node-b",
+            &proton,
+            "exit-ch",
+            proton_limit(&proton, Some(1), &custom),
+        )
+        .unwrap();
+        assert_eq!(desired.exits.len(), 2);
+        let error = route_node_to_server(
+            &mut desired,
+            "node-c",
+            &server("us-1"),
+            "exit-us",
+            proton_limit(&server("us-1"), Some(1), &custom),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("(1/1)"));
     }
 }

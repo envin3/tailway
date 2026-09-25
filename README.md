@@ -44,6 +44,18 @@ Set `HOST_BIND_IP` to a trusted host address and set the shared `CONTROL_GID` in
 
 Sockets, the compiled ruleset, and the transient WireGuard configuration live on the Compose-managed `runtime` tmpfs volume, not on disk; they are recreated on every start. Do not replace it with a bind mount: stale files owned by another UID break the capability-restricted agent, and WireGuard private keys would be copied to persistent storage. If the host already runs Tailscale, set `HOST_TAILSCALE_UDP_PORT` to a free UDP port such as `41642`. The container's `tailscaled` listens on the same port, because Tailscale advertises its own listen port to peers; with the two ports different, direct connections fail and traffic falls back to relays. Keep the project on a dedicated Docker bridge and do not attach unrelated containers.
 
+## Any WireGuard VPN
+
+Besides Proton, any provider's WireGuard configuration works as a location: Mullvad, IVPN, AirVPN, Windscribe, or your own WireGuard server. On **Locations**, choose **Import WireGuard**, pick the `.conf` file (or paste it), and give it a name, provider, and country; a file named like `mullvad-ch-zrh-wg-001.conf` fills these in. It then appears in every device's route menu under its provider.
+
+- **Requirements:** exactly one `[Peer]`, with an `Endpoint` and `AllowedIPs` including `0.0.0.0/0`; otherwise WireGuard would drop what the router sends into the tunnel. IPv6 addresses are ignored.
+- **Ignored settings:** `wg-quick`-only settings are dropped and never run: `PostUp` and the other scripts, `Table`, `FwMark`, `MTU`, `SaveConfig`.
+- **DNS:** the `DNS =` line names the in-tunnel resolver its devices use. Without one, their lookups still go through the tunnel, to the device's own DNS server.
+- **Storage:** configurations are kept in `state/custom-exits/`, one private file (`0600`) per import, named by a random ID. The API never returns them.
+- **Removing:** a location can be removed once no device uses it; its file, including the private key, is deleted.
+- **Connection limit:** imported tunnels do not count toward Proton's connection limit.
+- **Not handled:** key lifecycle is the provider's business. If a provider revokes or rotates a key, import the new configuration. The traffic probes mark a tunnel that stops passing traffic as failed, and alert.
+
 ## Import Proton exits
 
 Generate WireGuard configurations from Proton's supported account portal. Put each configuration in `proton-configs/`, assign it to `CONTROL_GID`, and set mode `0640`, then list only its relative filename and public metadata in `config/catalog.json`.
@@ -146,7 +158,7 @@ The agent reuses one tunnel when multiple nodes choose the same server and remov
 Each tunnel's routing table also carries a lowest-priority `unreachable` default route, so if the tunnel interface goes down or disappears, traffic and the gateway's own DNS queries for that exit fail instead of falling through to the home connection. Exit health is checked on every reconcile, in two layers:
 
 - **Handshakes.** A tunnel is **healthy** when its last handshake is under 180 seconds old, **degraded** up to 300 seconds (traffic stays in the tunnel), and **failed** beyond that or when no handshake arrives within 60 seconds of creation. Failed tunnels, and tunnels that are missing or down, are recreated automatically.
-- **Traffic.** A handshake proves only the control plane: Proton completes handshakes for a key it no longer forwards traffic for. So every tunnel with a good handshake also gets real packets, sent with the tunnel's firewall mark: a public-address lookup (OpenDNS `myip.opendns.com`, falling back to Cloudflare `whoami.cloudflare`) and a query to Proton's in-tunnel resolver 10.2.0.1.
+- **Traffic.** A handshake proves only the control plane: Proton completes handshakes for a key it no longer forwards traffic for. So every tunnel with a good handshake also gets real packets, sent with the tunnel's firewall mark: a public-address lookup (OpenDNS `myip.opendns.com`, falling back to Cloudflare `whoami.cloudflare`) and a query to the tunnel's own resolver (`DNS =` in its configuration, 10.2.0.1 for Proton) when it names one.
   - A successful lookup shows the exit's **public IP** in the console.
   - One failed lookup marks the exit degraded. Two in a row mark it **failed**, which blocks its devices, and the tunnel is recreated then and every ten failures after that.
   - Two unanswered resolver queries in a row mark the exit degraded. Every peer gets `PersistentKeepalive = 25` if its configuration lacks one, so idle tunnels still handshake. When a node's route changes, its tracked connections are reset so existing flows do not keep using the previous route.
@@ -166,9 +178,9 @@ MagicDNS keeps working: each device still answers tailnet names itself and forwa
 
 | Device | DNS |
 |---|---|
-| Routed to a Proton exit | `10.2.0.1` through that device's own tunnel, answered by its own Proton server |
-| Proton exit down, kill switch on (default) | `SERVFAIL`; nothing resolves |
-| Proton exit down, kill switch off | the device's DNS server over the gateway's own connection |
+| Routed to a VPN exit | the resolver its configuration names (`DNS =`; Proton: `10.2.0.1`) through that device's own tunnel; without one, the device's DNS server through the same tunnel |
+| VPN exit down, kill switch on (default) | `SERVFAIL`; nothing resolves |
+| VPN exit down, kill switch off | the device's DNS server over the gateway's own connection |
 | Direct, Local only, unassigned, or not using this exit node | the device's DNS server, default `DNS_DEFAULT_SERVER` (`9.9.9.9`) |
 
 Set the kill switch and DNS server per device in the **DNS** column of **Nodes**. `DNS_KILL_SWITCH_DEFAULT` sets the default kill switch; `DNS_FORWARDER=false` disables the forwarder.
