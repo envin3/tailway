@@ -36,7 +36,8 @@ cp config/catalog.example.json config/catalog.json
 chgrp "$CONTROL_GID" config proton-configs proton-broker-state state tls ui-auth
 chmod 770 proton-broker-state state
 chmod 2770 config proton-configs
-chmod 750 tls ui-auth
+chmod 750 tls
+chmod 2770 ui-auth
 ```
 
 Set `HOST_BIND_IP` to a trusted host address and set the shared `CONTROL_GID` in `.env`. Set `UNASSIGNED_POLICY` to `block` (default), `local`, or `direct`; it decides what happens to tailnet nodes that use this exit node without an assignment.
@@ -51,11 +52,13 @@ Do not put private keys in the catalog, Compose file, `.env`, this repository, o
 
 ## Configure console security
 
-Generate the bcrypt password hash:
+Set the first console password (the username starts as `admin`):
 
 ```sh
 ./scripts/create-ui-secrets.sh
 ```
+
+Both can be changed later on the console's **Console account** page. The account lives in `ui-auth/`, which the console writes to, so the directory must be group-writable (`2770`, group `CONTROL_GID`).
 
 Provide a certificate valid for the host's trusted LAN or tailnet name or address:
 
@@ -66,7 +69,7 @@ tls/tls.key
 
 Assign both TLS files to `CONTROL_GID` with mode `0640`. The UI child runs as UID `65532` with this group and does not rely on container root to bypass host file modes.
 
-The console refuses to start without TLS and a bcrypt hash. Publish port `8443` only on a trusted LAN or tailnet address and never forward it from the Internet.
+The console refuses to start without TLS and an account. Publish port `8443` only on a trusted LAN or tailnet address and never forward it from the Internet.
 
 ## Build and enroll
 
@@ -88,9 +91,21 @@ docker compose exec gateway-agent ip rule show
 docker compose top gateway-agent
 ```
 
-Open `https://<HOST_BIND_IP>:8443` and authenticate as `admin` with the password used by the secret generator.
+Open `https://<HOST_BIND_IP>:8443` and sign in.
 
-The browser's password prompt (HTTP Basic) is only the login step. A successful login issues an `HttpOnly`, `Secure`, `SameSite=Strict` session cookie that expires after 30 minutes idle or 12 hours, so bcrypt runs once per session rather than on every request. Each session has its own CSRF token, fetched from `/session`; changes require both the session cookie and that token, so cached Basic credentials alone cannot change routing. Ten wrong passwords from one client address within five minutes block further password attempts from that address for the rest of the window; requests without credentials do not count, and existing sessions keep working. Behind a reverse proxy such as `tailscale serve`, every client shares the proxy's address for this limit. Requests to the agent and broker time out after 30 seconds.
+**Sessions.** Signing in sets an `HttpOnly`, `Secure`, `SameSite=Strict` session cookie. It expires after 30 minutes idle or 12 hours. Each session has its own CSRF token, fetched from `/session`, and every change needs both the cookie and the token.
+
+**Sign-in protections.**
+- Sign-in and recovery requests must be JSON, and a present `Origin` must be the console's own, so another site cannot submit them.
+- Ten failed attempts (wrong passwords, wrong current passwords, wrong recovery codes) from one client address within five minutes block further attempts from that address for the rest of the window. Existing sessions keep working. Behind a reverse proxy such as `tailscale serve`, every client shares the proxy's address for this limit.
+
+**Changing the account.** The **Console account** page changes the username and password, and asks for the current password either way. A new password must be 12–72 characters. Changing it signs out every other session.
+
+**A forgotten password** can be reset in two ways:
+- **From the sign-in page:** choose **Forgot password?** to send an 8-digit code to the Telegram chat set up on the **Alerts** page. The code is valid for 10 minutes, allows five attempts, and works once; a new code can be requested once a minute. Codes go only to Telegram, never to a webhook, whose topic may be readable by others.
+- **On the server,** in the app directory while the stack runs: `scripts/reset-console-password.sh [username]`. The change applies immediately and ends every session.
+
+Requests to the agent and broker time out after 30 seconds.
 
 ## Proton account discovery
 
@@ -203,7 +218,7 @@ What to back up:
 | --- | --- | --- |
 | Tailscale node identity | `tailscale-state` Docker volume, on the LXC root disk | the LXC backup (vzdump) |
 | Loaded images | Docker, on the LXC root disk | the LXC backup; they can also be rebuilt from git |
-| Desired state, catalog, Proton session and profiles, UI secrets, TLS | the app directory (`.env`, `state/`, `config/`, `proton-broker-state/`, `proton-configs/`, `ui-auth/`, `tls/`) | snapshots of the dataset holding it; bind mounts are not in vzdump |
+| Desired state, catalog, Proton session and profiles, console account, TLS | the app directory (`.env`, `state/`, `config/`, `proton-broker-state/`, `proton-configs/`, `ui-auth/`, `tls/`) | snapshots of the dataset holding it; bind mounts are not in vzdump |
 
 To recover, restore the LXC backup and the app directory, then run `docker compose up -d --no-build`. If only the app directory survives, run the same command on a fresh LXC. It registers a new Tailscale node, which must be approved as an exit node again; after that, re-point the tailnet DNS nameserver at the new node's address.
 

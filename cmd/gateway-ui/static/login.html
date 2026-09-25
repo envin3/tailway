@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sign in · Exit Gateway</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body class="login-body">
+  <main class="login-shell">
+    <div class="brand login-brand"><span class="brand-mark">E</span><span>Exit Gateway</span></div>
+    <section class="login-card">
+      <form id="login-form">
+        <h1>Sign in</h1>
+        <label>Username<input id="login-username" autocomplete="username" autocapitalize="none" spellcheck="false" required maxlength="64" autofocus></label>
+        <label>Password<input id="login-password" type="password" autocomplete="current-password" required maxlength="128"></label>
+        <button>Sign in</button>
+        <button type="button" class="link-button" id="show-recovery">Forgot password?</button>
+      </form>
+
+      <form id="recovery-form" class="hidden">
+        <h1>Reset password</h1>
+        <p>A one-time code is sent to the Telegram chat set up for alerts. It is valid for 10 minutes.</p>
+        <button type="button" id="send-code">Send code</button>
+        <label>Code<input id="recovery-code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{8}" maxlength="8" required></label>
+        <label>New password<input id="recovery-password" type="password" autocomplete="new-password" minlength="12" maxlength="72" required></label>
+        <label>Repeat new password<input id="recovery-confirm" type="password" autocomplete="new-password" minlength="12" maxlength="72" required></label>
+        <button>Reset and sign in</button>
+        <p class="login-note">No Telegram? On the server, in the app directory, run <code>scripts/reset-console-password.sh</code>.</p>
+        <button type="button" class="link-button" id="show-login">Back to sign in</button>
+      </form>
+      <p id="login-message" class="form-result" role="status"></p>
+    </section>
+  </main>
+  <script src="/login.js" defer></script>
+</body>
+</html>

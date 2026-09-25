@@ -97,6 +97,21 @@ input:focus, select:focus { outline: 3px solid #b7ddd7; border-color: var(--teal
 .account-panel dl { display: grid; grid-template-columns: repeat(2, 1fr); gap: 18px; margin: 0 0 24px; }
 .account-panel dl div { border-bottom: 1px solid var(--line); padding-bottom: 9px; }
 .account-panel dt { color: var(--muted); font-size: 11px; text-transform: uppercase; }
+.login-body { min-height: 100vh; display: grid; place-items: center; }
+.login-shell { width: min(420px, 100%); padding: 32px 16px; }
+.login-brand { justify-content: center; padding: 0 0 22px; color: var(--ink); font-size: 18px; }
+.login-card { padding: 28px; background: var(--surface); border: 1px solid var(--line); border-radius: 6px; }
+.login-card form { display: grid; gap: 16px; }
+.login-card h1 { font-size: 24px; }
+.login-card label { display: grid; gap: 7px; font-size: 13px; font-weight: 700; }
+.login-card p { margin: 0; font-size: 13px; }
+.login-note code { font-size: 12px; overflow-wrap: anywhere; }
+.link-button { justify-self: start; padding: 0; color: var(--teal-dark); background: none; font-size: 13px; text-decoration: underline; }
+.link-button:hover { background: none; color: var(--teal); }
+.sign-out { justify-self: start; margin-top: 8px; padding: 6px 10px; color: #e9f1ee; background: #203c3e; font-size: 12px; }
+.sign-out:hover { background: #315052; }
+.account-note { margin: 0 0 8px; font-size: 13px; }
+.account-panel .toggle input { width: auto; accent-color: var(--teal); }
 .alert-channel { display: grid; gap: 14px; margin: 0; padding: 16px; border: 1px solid var(--line); border-radius: 5px; }
 .alert-channel legend { padding: 0 6px; }
 .account-panel .toggle { display: flex; align-items: center; gap: 8px; font-size: 14px; }

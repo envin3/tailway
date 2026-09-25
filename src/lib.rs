@@ -1,3 +1,4 @@
+pub mod account;
 pub mod alert;
 pub mod catalog;
 pub mod control;

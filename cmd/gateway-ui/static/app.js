@@ -4,7 +4,7 @@ const LOCAL_ROUTE_ID = "__local__";
 const DIRECT_ROUTE_ID = "__direct__";
 const BUILTIN_ROUTES = new Set([LOCAL_ROUTE_ID, DIRECT_ROUTE_ID]);
 const POLICY_LABELS = { block: "Blocked", local: "Local only", direct: "Direct Internet" };
-const state = { alerts: null, alertFormLoaded: false, revision: 0, csrfToken: "", status: null, servers: [], protonServers: [], protonAccount: null, protonAvailable: true, exits: [], devices: [], selectedServer: null, serverPage: 1, expandedCountry: "", countryServerPage: 1 };
+const state = { username: "", consoleAccount: null, accountFormLoaded: false, alerts: null, alertFormLoaded: false, revision: 0, csrfToken: "", status: null, servers: [], protonServers: [], protonAccount: null, protonAvailable: true, exits: [], devices: [], selectedServer: null, serverPage: 1, expandedCountry: "", countryServerPage: 1 };
 const regionNames = new Intl.DisplayNames(["en"], { type: "region" });
 
 const api = async (path, options = {}) => {
@@ -12,6 +12,10 @@ const api = async (path, options = {}) => {
   if (options.method && options.method !== "GET") headers["X-CSRF-Token"] = state.csrfToken;
   const response = await fetch(path, { ...options, headers, cache: "no-store" });
   const payload = await response.json().catch(() => ({}));
+  if (response.status === 401) {
+    location.replace("/login");
+    throw new Error("Signed out");
+  }
   if (response.status === 403 && payload.error === "invalid CSRF token" && !options.csrfRetried) {
     // The session expired and a new one was issued; fetch its token and retry once.
     state.csrfToken = (await api("/session")).csrfToken;
@@ -23,11 +27,16 @@ const api = async (path, options = {}) => {
 
 const load = async () => {
   try {
-    if (!state.csrfToken) state.csrfToken = (await api("/session")).csrfToken;
-    const [status, catalog, exits, devices, alerts] = await Promise.all([
-      api("/v1/status"), api("/v1/catalog"), api("/v1/exits"), api("/v1/devices"), api("/v1/alerts")
+    if (!state.csrfToken) {
+      const session = await api("/session");
+      state.csrfToken = session.csrfToken;
+      state.username = session.username;
+    }
+    const [status, catalog, exits, devices, alerts, consoleAccount] = await Promise.all([
+      api("/v1/status"), api("/v1/catalog"), api("/v1/exits"), api("/v1/devices"), api("/v1/alerts"), api("/auth/account")
     ]);
     state.alerts = alerts;
+    state.consoleAccount = consoleAccount;
     state.status = status;
     state.servers = catalog.servers || [];
     state.exits = exits.exits || [];
@@ -49,6 +58,7 @@ const load = async () => {
     }
     render();
     renderAlerts();
+    renderConsoleAccount();
     showAlert([status.lastError, ...activeProblems(status)].filter(Boolean).join(" · "));
   } catch (error) {
     showAlert(error.message);
@@ -259,6 +269,34 @@ document.querySelector("#server-page-prev").addEventListener("click", () => { st
 document.querySelector("#server-page-next").addEventListener("click", () => { state.serverPage += 1; state.expandedCountry = ""; renderServers(); });
 document.querySelector("#node-search").addEventListener("input", renderDevices);
 document.querySelector("#refresh").addEventListener("click", load);
+document.querySelector("#sign-out").addEventListener("click", async () => {
+  try { await api("/auth/logout", { method: "POST", body: "{}" }); } catch (_) { /* already signed out */ }
+  location.replace("/login");
+});
+document.querySelector("#console-account-form").addEventListener("submit", async event => {
+  event.preventDefault();
+  const result = document.querySelector("#account-result");
+  const setResult = (text, kind = "") => { result.textContent = text; result.className = `form-result ${kind}`; };
+  const newPassword = document.querySelector("#account-new-password");
+  const confirmation = document.querySelector("#account-confirm-password");
+  const current = document.querySelector("#account-current-password");
+  if (newPassword.value !== confirmation.value) return setResult("The new passwords do not match.", "bad");
+  setResult("Saving…");
+  try {
+    const saved = await api("/auth/account", { method: "PUT", body: JSON.stringify({
+      currentPassword: current.value,
+      username: document.querySelector("#account-username").value.trim(),
+      newPassword: newPassword.value || null
+    }) });
+    state.consoleAccount = { ...state.consoleAccount, username: saved.username, passwordChangedAt: saved.passwordChangedAt };
+    renderConsoleAccount();
+    setResult(saved.passwordChanged ? "Saved. Other browsers were signed out." : "Saved.", "good");
+  } catch (error) {
+    setResult(error.message, "bad");
+  } finally {
+    for (const input of [newPassword, confirmation, current]) input.value = "";
+  }
+});
 document.querySelector("#alert-form").addEventListener("change", event => {
   if (event.target.matches("#telegram-enabled, #webhook-enabled")) syncAlertChannels();
 });
@@ -372,6 +410,23 @@ const renderAlerts = () => {
   document.querySelector("#alert-active").innerHTML = active.length
     ? active.map(alert => `<p><strong>${escapeHTML(alert.key)}</strong>${escapeHTML(alert.message)}<br><span class="muted">Since ${escapeHTML(new Date(alert.since * 1000).toLocaleString())}${alert.notified ? " · notified" : " · waiting for the grace period"}</span></p>`).join("")
     : `<p class="muted">No problems right now.</p>`;
+};
+
+const renderConsoleAccount = () => {
+  const account = state.consoleAccount;
+  if (!account) return;
+  state.username = account.username;
+  document.querySelector("#signed-in-user").textContent = account.username;
+  if (!state.accountFormLoaded) {
+    document.querySelector("#account-username").value = account.username;
+    state.accountFormLoaded = true;
+  }
+  document.querySelector("#account-recovery").textContent = account.recovery?.telegram
+    ? "Forgot your password? The sign-in page can send a one-time code to the Telegram chat set up on the Alerts page."
+    : "Set up Telegram on the Alerts page to reset a forgotten password from the sign-in page. Without it, reset the password on the server with scripts/reset-console-password.sh.";
+  document.querySelector("#account-changed").textContent = account.passwordChangedAt
+    ? `Password last changed ${new Date(account.passwordChangedAt * 1000).toLocaleString()}.`
+    : "";
 };
 
 const setAlertResult = (message, kind = "") => {

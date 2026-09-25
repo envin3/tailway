@@ -17,8 +17,9 @@
         <button class="nav-item" data-view="exits">Active exits</button>
         <button class="nav-item" data-view="devices">Nodes</button>
         <button class="nav-item" data-view="alerts">Alerts</button>
+        <button class="nav-item" data-view="console-account">Console account</button>
       </nav>
-      <div class="adapter"><span>Catalog adapter</span><strong>Static import</strong></div>
+      <div class="adapter"><span>Signed in as</span><strong id="signed-in-user"></strong><button id="sign-out" class="sign-out">Sign out</button></div>
     </aside>
     <main>
       <header>
@@ -83,6 +84,23 @@
           </form>
           <h3 class="panel-subheading">Current conditions</h3>
           <div id="alert-active" class="alert-active"></div>
+        </div>
+      </section>
+
+      <section id="console-account" class="view">
+        <div class="section-heading"><div><h2>Console account</h2><p>The sign-in for this console. Changing the password signs out every other browser.</p></div></div>
+        <div class="account-panel">
+          <form id="console-account-form">
+            <label>Username<input id="account-username" autocomplete="username" autocapitalize="none" spellcheck="false" required maxlength="64"></label>
+            <label>New password (leave empty to keep the current one)<input id="account-new-password" type="password" autocomplete="new-password" minlength="12" maxlength="72"></label>
+            <label>Repeat new password<input id="account-confirm-password" type="password" autocomplete="new-password" maxlength="72"></label>
+            <label>Current password<input id="account-current-password" type="password" autocomplete="current-password" required maxlength="128"></label>
+            <button>Save</button>
+            <p id="account-result" class="form-result" role="status"></p>
+          </form>
+          <h3 class="panel-subheading">Password recovery</h3>
+          <p id="account-recovery" class="account-note"></p>
+          <p id="account-changed" class="account-note"></p>
         </div>
       </section>
 

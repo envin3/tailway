@@ -354,6 +354,29 @@ impl Notifier {
         Ok(())
     }
 
+    /// Send a console password-reset code. Telegram only: a webhook such as an
+    /// ntfy topic may be readable by others.
+    pub async fn send_recovery_code(&self, code: &str) -> Result<()> {
+        let Some(telegram) = self.settings.get().telegram else {
+            bail!("Telegram is not configured");
+        };
+        let response = self
+            .client
+            .post(format!(
+                "{}/bot{}/sendMessage",
+                self.telegram_api, telegram.bot_token
+            ))
+            .json(&serde_json::json!({
+                "chat_id": telegram.chat_id,
+                "text": recovery_text(&self.source, code),
+                "disable_web_page_preview": true,
+            }))
+            .send()
+            .await
+            .map_err(redact)?;
+        telegram_result(response).await.map(|_| ())
+    }
+
     /// Chats that recently messaged the bot, to find the chat ID to use. Only
     /// works while no other program is polling the same bot.
     pub async fn telegram_chats(&self, bot_token: &str) -> Result<Vec<Chat>> {
@@ -414,6 +437,12 @@ fn telegram_text(source: &str, notification: &Notification) -> String {
     format!(
         "{icon} {}\n{}\n\n{source}",
         notification.title, notification.message
+    )
+}
+
+fn recovery_text(source: &str, code: &str) -> String {
+    format!(
+        "🔑 Console password reset code: {code}\nIt expires in 10 minutes. If you did not ask for it, someone is trying to reset the console password.\n\n{source}"
     )
 }
 
@@ -698,6 +727,34 @@ mod tests {
         assert!(request.starts_with("post /topic"));
         assert!(request.contains("title: gateway: test"));
         assert!(request.ends_with("hello"));
+    }
+
+    #[tokio::test]
+    async fn sends_recovery_codes_only_through_telegram() {
+        let directory = tempfile::tempdir().unwrap();
+        let webhook_only = Settings {
+            telegram: None,
+            webhook: Some(Webhook {
+                url: "https://ntfy.sh/topic".into(),
+                format: Format::Ntfy,
+            }),
+        };
+        let error = notifier(directory.path(), webhook_only, TELEGRAM_API)
+            .send_recovery_code("12345678")
+            .await
+            .unwrap_err();
+        assert_eq!(error.to_string(), "Telegram is not configured");
+
+        let (api, request) = fake_server("200 OK", r#"{"ok":true,"result":{}}"#).await;
+        let settings = Settings {
+            telegram: Some(telegram()),
+            webhook: None,
+        };
+        notifier(directory.path(), settings, &api)
+            .send_recovery_code("12345678")
+            .await
+            .unwrap();
+        assert!(request.await.unwrap().contains("reset code: 12345678"));
     }
 
     #[tokio::test]

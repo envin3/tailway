@@ -34,7 +34,7 @@ services:
       CONTROL_GID: ${CONTROL_GID:-1000}
       CONTROL_SOCKET: /run/tailscale-exit-policy-router/control.sock
       LISTEN_ADDRESS: :8443
-      PASSWORD_HASH_FILE: /run/secrets/ui/password.bcrypt
+      ACCOUNT_DIRECTORY: /var/lib/gateway-ui
       RECONCILE_INTERVAL: 30s
       RUNTIME_DIRECTORY: /run/tailscale-exit-policy-router
       PROTON_BROKER_SOCKET: /run/tailscale-exit-policy-router/proton.sock
@@ -60,7 +60,8 @@ services:
       - ./proton-configs:/run/secrets/proton:ro
       - ./state:/var/lib/tailscale-exit-policy-router
       - runtime:/run/tailscale-exit-policy-router
-      - ./ui-auth:/run/secrets/ui:ro
+      # The console account (writable: the password can be changed in the console).
+      - ./ui-auth:/var/lib/gateway-ui
       - ./tls:/run/secrets/tls:ro
     ports:
       - "${HOST_TAILSCALE_UDP_PORT:-41641}:${HOST_TAILSCALE_UDP_PORT:-41641}/udp"

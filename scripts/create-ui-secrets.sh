@@ -20,6 +20,7 @@ printf '%s' "$password" \
   > "$auth_directory/password.bcrypt"
 unset password
 chgrp "$control_gid" "$auth_directory" "$auth_directory/password.bcrypt"
-chmod 750 "$auth_directory"
+# The console writes its account here when the password is changed.
+chmod 2770 "$auth_directory"
 chmod 640 "$auth_directory/password.bcrypt"
 echo "Created UI authentication secrets in $auth_directory"
