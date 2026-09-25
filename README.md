@@ -110,7 +110,7 @@ Open `https://<HOST_BIND_IP>:8443` and sign in.
   Changing these settings needs the current console password, because whoever controls them can reset the password. **Save and send test email** confirms delivery. The SMTP password is never shown again.
 
   Then **Forgot password?** on the sign-in page emails an 8-digit code. The code is valid for 10 minutes, allows five attempts, and works once; a new code can be requested once a minute. The sign-in page shows only a masked address (`e•••@example.com`).
-- **On the server,** in the app directory while the stack runs: `scripts/reset-console-password.sh [username]`. The change applies immediately and ends every session. Recovery settings are kept.
+- **On the server,** while the stack runs: `scripts/reset-console-password.sh [username]`. Run it on the Docker host, or on a Proxmox host whose LXC runs the gateway (it goes through `pct`; set `GATEWAY_CTID` if the LXC is not 103). The change applies immediately and ends every session. Recovery settings are kept.
 
 Requests to the agent and broker time out after 30 seconds.
 
