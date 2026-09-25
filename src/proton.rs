@@ -20,11 +20,22 @@ pub struct AccountLimits {
     socket_path: PathBuf,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct AccountResponse {
-    state: String,
-    max_connections: Option<usize>,
+pub struct Account {
+    pub state: String,
+    pub max_connections: Option<usize>,
+    /// Remaining lifetime of the certificate that authorises the WireGuard key.
+    pub certificate_valid_seconds: Option<i64>,
+    /// Whether the broker's certificate refresher is running.
+    #[serde(default)]
+    pub background_refresh: bool,
+}
+
+impl Account {
+    pub fn authenticated(&self) -> bool {
+        self.state == "authenticated"
+    }
 }
 
 impl AccountLimits {
@@ -35,13 +46,25 @@ impl AccountLimits {
     }
 
     pub async fn exit_limit(&self) -> Result<Option<usize>> {
-        tokio::time::timeout(ACCOUNT_TIMEOUT, read_exit_limit(&self.socket_path))
+        let account = self.account().await?;
+        Ok(account
+            .authenticated()
+            .then(|| {
+                account
+                    .max_connections
+                    .map(|limit| limit.min(RUNTIME_EXIT_LIMIT))
+            })
+            .flatten())
+    }
+
+    pub async fn account(&self) -> Result<Account> {
+        tokio::time::timeout(ACCOUNT_TIMEOUT, read_account(&self.socket_path))
             .await
             .context("Proton account broker timed out")?
     }
 }
 
-async fn read_exit_limit(socket_path: &Path) -> Result<Option<usize>> {
+async fn read_account(socket_path: &Path) -> Result<Account> {
     let stream = UnixStream::connect(socket_path)
         .await
         .context("connect to Proton account broker")?;
@@ -67,14 +90,7 @@ async fn read_exit_limit(socket_path: &Path) -> Result<Option<usize>> {
         .await
         .map_err(|error| anyhow::anyhow!("read Proton account metadata: {error}"))?
         .to_bytes();
-    let account: AccountResponse = serde_json::from_slice(&body)?;
-    Ok((account.state == "authenticated")
-        .then(|| {
-            account
-                .max_connections
-                .map(|limit| limit.min(RUNTIME_EXIT_LIMIT))
-        })
-        .flatten())
+    Ok(serde_json::from_slice(&body)?)
 }
 
 #[cfg(test)]
@@ -85,9 +101,15 @@ mod tests {
 
     #[test]
     fn account_response_uses_authenticated_quota() {
-        let account: AccountResponse =
-            serde_json::from_str(r#"{"state":"authenticated","maxConnections":11}"#).unwrap();
+        let account: Account = serde_json::from_str(
+            r#"{"state":"authenticated","maxConnections":11,"certificateValidSeconds":540490,"backgroundRefresh":true}"#,
+        )
+        .unwrap();
         assert_eq!(account.max_connections, Some(11));
+        assert_eq!(account.certificate_valid_seconds, Some(540_490));
+        assert!(account.background_refresh && account.authenticated());
+        let signed_out: Account = serde_json::from_str(r#"{"state":"signedOut"}"#).unwrap();
+        assert!(!signed_out.authenticated() && !signed_out.background_refresh);
     }
 
     #[tokio::test]
@@ -116,7 +138,8 @@ mod tests {
                 .await
                 .unwrap();
         });
-        assert_eq!(read_exit_limit(&socket_path).await.unwrap(), Some(11));
+        let limits = AccountLimits::new(&socket_path);
+        assert_eq!(limits.exit_limit().await.unwrap(), Some(11));
         server.await.unwrap();
     }
 

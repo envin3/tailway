@@ -10,6 +10,7 @@ use rand::RngCore;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+use crate::alert::Alerts;
 use crate::catalog::StaticCatalog;
 use crate::dns;
 use crate::domain::{
@@ -26,6 +27,7 @@ pub struct Api {
     devices: Arc<Provider>,
     reconciler: Arc<Reconciler>,
     account_limits: Arc<AccountLimits>,
+    alerts: Arc<Alerts>,
 }
 
 #[derive(Deserialize)]
@@ -68,6 +70,7 @@ impl Api {
         devices: Arc<Provider>,
         reconciler: Arc<Reconciler>,
         account_limits: Arc<AccountLimits>,
+        alerts: Arc<Alerts>,
     ) -> Arc<Self> {
         Arc::new(Self {
             store,
@@ -75,6 +78,7 @@ impl Api {
             devices,
             reconciler,
             account_limits,
+            alerts,
         })
     }
 
@@ -119,6 +123,7 @@ async fn get_status(State(api): State<Arc<Api>>) -> Response {
             "exitLimit": exit_limit,
             "dryRun": api.reconciler.dry_run(),
             "unassignedPolicy": api.reconciler.unassigned_policy().as_str(),
+            "alerts": api.alerts.active(),
             "dns": api.reconciler.dns().map(|resolver| {
                 let defaults = resolver.defaults();
                 json!({

@@ -42,6 +42,7 @@ services:
       START_TAILSCALED: "true"
       STATE_PATH: /var/lib/tailscale-exit-policy-router/desired.json
       TAILSCALE_INTERFACE: tailscale0
+      TAILSCALE_PORT: ${HOST_TAILSCALE_UDP_PORT:-41641}
       TAILSCALE_STATE: /var/lib/tailscale/tailscaled.state
       TLS_CERT_FILE: /run/secrets/tls/tls.crt
       TLS_KEY_FILE: /run/secrets/tls/tls.key
@@ -49,6 +50,9 @@ services:
       DNS_FORWARDER: ${DNS_FORWARDER:-true}
       DNS_DEFAULT_SERVER: ${DNS_DEFAULT_SERVER:-9.9.9.9}
       DNS_KILL_SWITCH_DEFAULT: ${DNS_KILL_SWITCH_DEFAULT:-true}
+      ALERT_WEBHOOK_URL: ${ALERT_WEBHOOK_URL:-}
+      ALERT_WEBHOOK_FORMAT: ${ALERT_WEBHOOK_FORMAT:-ntfy}
+      ALERT_SOURCE: ${ALERT_SOURCE:-tailscale-exit-policy-router}
       WAN_INTERFACE: eth0
     volumes:
       - ./config:/etc/tailscale-exit-policy-router:ro
@@ -59,7 +63,7 @@ services:
       - ./ui-auth:/run/secrets/ui:ro
       - ./tls:/run/secrets/tls:ro
     ports:
-      - "${HOST_TAILSCALE_UDP_PORT:-41641}:41641/udp"
+      - "${HOST_TAILSCALE_UDP_PORT:-41641}:${HOST_TAILSCALE_UDP_PORT:-41641}/udp"
       - "${HOST_BIND_IP:?Set HOST_BIND_IP in .env}:8443:8443/tcp"
     networks:
       - router-net

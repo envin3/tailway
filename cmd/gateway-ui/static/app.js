@@ -47,7 +47,7 @@ const load = async () => {
       state.protonServers = [];
     }
     render();
-    showAlert(status.lastError || "");
+    showAlert([status.lastError, ...activeProblems(status)].filter(Boolean).join(" · "));
   } catch (error) {
     showAlert(error.message);
     document.querySelector("#health-label").textContent = "Unavailable";
@@ -55,8 +55,11 @@ const load = async () => {
   }
 };
 
+// Conditions that outlived their grace period (the ones that were notified).
+const activeProblems = (status) => (status?.alerts || []).filter((alert) => alert.notified).map((alert) => alert.message);
+
 const render = () => {
-  const healthy = state.status?.state === "healthy";
+  const healthy = state.status?.state === "healthy" && activeProblems(state.status).length === 0;
   document.querySelector("#health-label").textContent = healthy ? "Agent healthy" : "Action required";
   document.querySelector("#health-dot").className = healthy ? "good" : "bad";
   document.querySelector("#metric-state").textContent = state.status?.state || "Unknown";

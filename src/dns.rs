@@ -356,6 +356,11 @@ async fn answer(
     }
 }
 
+/// One UDP exchange with the upstream timeout; used by the tunnel probes.
+pub async fn query_udp(upstream: Upstream, query: &[u8]) -> Result<Vec<u8>> {
+    exchange(upstream, query, Transport::Udp).await
+}
+
 async fn exchange(upstream: Upstream, query: &[u8], transport: Transport) -> Result<Vec<u8>> {
     let exchange = async {
         match transport {

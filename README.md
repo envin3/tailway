@@ -41,7 +41,7 @@ chmod 750 tls ui-auth
 
 Set `HOST_BIND_IP` to a trusted host address and set the shared `CONTROL_GID` in `.env`. Set `UNASSIGNED_POLICY` to `block` (default), `local`, or `direct`; it decides what happens to tailnet nodes that use this exit node without an assignment.
 
-Sockets, the compiled ruleset, and the transient WireGuard configuration live on the Compose-managed `runtime` tmpfs volume, not on disk; they are recreated on every start. Do not replace it with a bind mount: stale files owned by another UID break the capability-restricted agent, and WireGuard private keys would be copied to persistent storage. If the host already runs Tailscale, set `HOST_TAILSCALE_UDP_PORT` to a free UDP port such as `41642`; the container still listens on `41641`. Keep the project on a dedicated Docker bridge and do not attach unrelated containers.
+Sockets, the compiled ruleset, and the transient WireGuard configuration live on the Compose-managed `runtime` tmpfs volume, not on disk; they are recreated on every start. Do not replace it with a bind mount: stale files owned by another UID break the capability-restricted agent, and WireGuard private keys would be copied to persistent storage. If the host already runs Tailscale, set `HOST_TAILSCALE_UDP_PORT` to a free UDP port such as `41642`. The container's `tailscaled` listens on the same port, because Tailscale advertises its own listen port to peers; with the two ports different, direct connections fail and traffic falls back to relays. Keep the project on a dedicated Docker bridge and do not attach unrelated containers.
 
 ## Import Proton exits
 
@@ -118,7 +118,13 @@ The agent reuses one tunnel when multiple nodes choose the same server and remov
 
 `Direct Internet` forwards through the gateway's ordinary Internet connection without Proton. Unassigned nodes follow `UNASSIGNED_POLICY`; the default, `block`, rejects their forwarded traffic so a new or forgotten device never leaves through the home connection by accident. `Local only` blocks public Internet forwarding while preserving direct tailnet connectivity and access to private or link-local IPv4 destinations through the gateway. A selected Proton route remains fail-closed if its tunnel becomes unhealthy.
 
-Each tunnel's routing table also carries a lowest-priority `unreachable` default route, so if the tunnel interface goes down or disappears, traffic and the gateway's own DNS queries for that exit fail instead of falling through to the home connection. Exit health comes from WireGuard handshakes, checked on every reconcile. A tunnel is **healthy** when its last handshake is under 180 seconds old, **degraded** up to 300 seconds (traffic stays in the tunnel), and **failed** beyond that or when no handshake arrives within 60 seconds of creation; failed and missing or downed tunnels are recreated automatically. Every peer gets `PersistentKeepalive = 25` if its configuration lacks one, so idle tunnels still handshake. When a node's route changes, its tracked connections are reset so existing flows do not keep using the previous route.
+Each tunnel's routing table also carries a lowest-priority `unreachable` default route, so if the tunnel interface goes down or disappears, traffic and the gateway's own DNS queries for that exit fail instead of falling through to the home connection. Exit health is checked on every reconcile, in two layers:
+
+- **Handshakes.** A tunnel is **healthy** when its last handshake is under 180 seconds old, **degraded** up to 300 seconds (traffic stays in the tunnel), and **failed** beyond that or when no handshake arrives within 60 seconds of creation. Failed tunnels, and tunnels that are missing or down, are recreated automatically.
+- **Traffic.** A handshake proves only the control plane: Proton completes handshakes for a key it no longer forwards traffic for. So every tunnel with a good handshake also gets real packets, sent with the tunnel's firewall mark: a public-address lookup (OpenDNS `myip.opendns.com`, falling back to Cloudflare `whoami.cloudflare`) and a query to Proton's in-tunnel resolver 10.2.0.1.
+  - A successful lookup shows the exit's **public IP** in the console.
+  - One failed lookup marks the exit degraded. Two in a row mark it **failed**, which blocks its devices, and the tunnel is recreated then and every ten failures after that.
+  - Two unanswered resolver queries in a row mark the exit degraded. Every peer gets `PersistentKeepalive = 25` if its configuration lacks one, so idle tunnels still handshake. When a node's route changes, its tracked connections are reset so existing flows do not keep using the previous route.
 
 Direct mode inherits the Docker host's egress path. To guarantee that **Direct Internet** means no VPN, disable any host-level VPN or its autoconnect setting; otherwise direct traffic will follow that host VPN even though it does not use a router-managed Proton tunnel.
 
@@ -145,6 +151,47 @@ Set the kill switch and DNS server per device in the **DNS** column of **Nodes**
 The nftables table redirects TCP and UDP port 53 addressed to the gateway itself on `tailscale0` to the forwarder on port 5353, so the agent needs no extra capability; DNS forwarded to other resolvers is routed like any other traffic. Only tailnet addresses (`100.64.0.0/10`) are answered. Until the gateway's own Tailscale is running with the tailnet's device list, and whenever it is not (for example logged out), every lookup gets `SERVFAIL`: without the device list a Proton device would look unknown and be sent to the default server over the home connection. After a restart the agent reconciles every two seconds until Tailscale is running, so DNS normally returns within seconds.
 
 If the gateway is down, Tailscale uses the second nameserver. Devices using this exit node cannot reach it, because their traffic still goes to the unavailable exit node, so they get no DNS at all; other devices keep resolving. Tailscale may occasionally use the second nameserver even while the gateway is up.
+
+## Alerts
+
+Set `ALERT_WEBHOOK_URL` in `.env` to receive notifications. The value is either an [ntfy](https://ntfy.sh) topic URL (the default `ALERT_WEBHOOK_FORMAT=ntfy` sends a plain-text body with `Title`, `Priority`, and `Tags` headers) or any webhook that accepts `ALERT_WEBHOOK_FORMAT=json` (`{source, key, kind, title, message}`). The agent sends a notification when a problem outlasts its grace period, and another when it clears:
+
+| Condition | Grace |
+| --- | --- |
+| An exit is failed (its devices are blocked) | none (already debounced by the health checks) |
+| Reconciliation keeps failing | 90 s |
+| Tailscale on the gateway is not running | 3 min |
+| The Proton session is signed out, or the broker is unreachable | 10 min (polled every 5 min) |
+| Certificate renewal is not running, or the certificate expires within 24 h | none |
+
+The agent also sends an info message whenever it starts, so restarts are visible. Without a webhook, alerts are still logged. The console shows the notified ones in its banner and health indicator, and `GET /v1/status` lists all current conditions under `alerts`.
+
+The agent cannot report its own absence. On a Proxmox host, `deploy/proxmox/` has a watchdog that runs every two minutes. It alerts, through the same webhook, when the gateway LXC is stopped, when either container is missing or unhealthy, or when the gateway's tailnet DNS stops answering. It alerts after two consecutive failures and again on recovery:
+
+```sh
+install -m 755 deploy/proxmox/tepr-watchdog.sh /usr/local/sbin/tepr-watchdog
+install -m 644 deploy/proxmox/tepr-watchdog.{service,timer} /etc/systemd/system/
+printf 'CTID=103\nGATEWAY_DNS=<gateway tailnet IP>\nALERT_WEBHOOK_URL=<url>\n' > /etc/default/tepr-watchdog
+systemctl daemon-reload && systemctl enable --now tepr-watchdog.timer
+```
+
+## Availability and recovery
+
+The gateway is a single point of failure for every device routed through it, and for tailnet DNS when the tailnet nameserver points at it.
+
+- **Gateway down, exit devices:** devices using the gateway as their exit node lose Internet access until it returns or they switch exit node. This is the intended fail-closed behaviour.
+- **Gateway down, other devices:** with the gateway listed first and a public resolver (for example `9.9.9.9`) second, Tailscale's resolver races the configured nameservers, so devices not using the exit keep resolving through the second one. MagicDNS names keep working because 100.100.100.100 answers them locally.
+- **Restarts:** the LXC starts on boot (`onboot=1`) and both containers use `restart: unless-stopped`. Routing and DNS are fail-closed until the first reconcile after start, which retries every 2 s while Tailscale comes up.
+
+What to back up:
+
+| Data | Where | Covered by |
+| --- | --- | --- |
+| Tailscale node identity | `tailscale-state` Docker volume, on the LXC root disk | the LXC backup (vzdump) |
+| Loaded images | Docker, on the LXC root disk | the LXC backup; they can also be rebuilt from git |
+| Desired state, catalog, Proton session and profiles, UI secrets, TLS | the app directory (`.env`, `state/`, `config/`, `proton-broker-state/`, `proton-configs/`, `ui-auth/`, `tls/`) | snapshots of the dataset holding it; bind mounts are not in vzdump |
+
+To recover, restore the LXC backup and the app directory, then run `docker compose up -d --no-build`. If only the app directory survives, run the same command on a fresh LXC. It registers a new Tailscale node, which must be approved as an exit node again; after that, re-point the tailnet DNS nameserver at the new node's address.
 
 ## Development
 

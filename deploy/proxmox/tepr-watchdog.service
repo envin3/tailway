@@ -1,0 +1,7 @@
+[Unit]
+Description=Tailscale exit policy router watchdog
+After=pve-guests.service tailscaled.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/tepr-watchdog

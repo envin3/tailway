@@ -1,9 +1,11 @@
+pub mod alert;
 pub mod catalog;
 pub mod control;
 pub mod dns;
 pub mod domain;
 pub mod platform;
 pub mod policy;
+pub mod probe;
 pub mod proton;
 pub mod reconcile;
 pub mod state;

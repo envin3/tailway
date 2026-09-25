@@ -15,6 +15,7 @@ use crate::dns;
 use crate::domain::{Exit, ExitStatus, UnassignedPolicy};
 use crate::platform::Runner;
 use crate::policy::{self, MARK_MASK};
+use crate::probe;
 use crate::state::Store;
 use crate::tailscale::Provider;
 use crate::wireguard;
@@ -28,6 +29,12 @@ const STALE_HANDSHAKE_AGE: Duration = Duration::from_secs(300);
 const FIRST_HANDSHAKE_GRACE: Duration = Duration::from_secs(60);
 /// How long a reconcile waits for a freshly created tunnel's first handshake.
 const FIRST_HANDSHAKE_WAIT: Duration = Duration::from_secs(5);
+/// Consecutive failed traffic probes before an exit counts as failed (one probe
+/// per reconcile, so about a minute at the default interval).
+const PROBE_FAILURE_LIMIT: u32 = 2;
+/// While probes keep failing, recreate the tunnel this often (in probes) rather
+/// than on every reconcile: a rebuild cannot fix an invalid certificate.
+const PROBE_REBUILD_EVERY: u32 = 10;
 
 #[derive(Clone)]
 pub struct Config {
@@ -54,6 +61,14 @@ struct Runtime {
     applied_routes: BTreeMap<Ipv4Addr, String>,
     unknown_nodes: Vec<String>,
     applied_revision: Option<u64>,
+    probes: HashMap<String, ProbeState>,
+}
+
+#[derive(Default)]
+struct ProbeState {
+    egress_failures: u32,
+    resolver_failures: u32,
+    public_ip: Option<Ipv4Addr>,
 }
 
 /// Last reconcile outcome, readable without waiting for a reconcile in progress.
@@ -183,6 +198,7 @@ impl Reconciler {
 
         self.remove_stale_tunnels(&mut runtime, &desired_ids).await;
         let mut runtime_exits = Vec::with_capacity(desired.exits.len());
+        let mut verdicts = Vec::with_capacity(desired.exits.len());
         for mut wanted in desired.exits {
             let slot = allocate_slot(&mut runtime, &wanted.id)?;
             wanted.interface = format!("proton{slot}");
@@ -198,6 +214,12 @@ impl Reconciler {
                     Ok(()) => self.check_tunnel(&mut runtime, &wanted).await,
                 },
             };
+            runtime_exits.push(wanted);
+            verdicts.push(verdict);
+        }
+        self.probe_tunnels(&mut runtime, &runtime_exits, &mut verdicts)
+            .await;
+        for (wanted, verdict) in runtime_exits.iter_mut().zip(verdicts) {
             if verdict.rebuild {
                 // Dropping the fingerprint makes the next reconcile recreate the tunnel.
                 runtime.tunnels.remove(&wanted.id);
@@ -207,7 +229,12 @@ impl Reconciler {
             }
             wanted.status = verdict.status;
             wanted.status_detail = verdict.detail;
-            runtime_exits.push(wanted);
+            wanted.public_ip = runtime
+                .probes
+                .get(&wanted.id)
+                .and_then(|probe| probe.public_ip)
+                .map(|address| address.to_string())
+                .unwrap_or_default();
         }
         let compiled = policy::compile(policy::Input {
             wan_interface: &self.config.wan_interface,
@@ -443,6 +470,28 @@ impl Reconciler {
         }
     }
 
+    /// Send traffic through every tunnel whose handshake looks fine, concurrently.
+    async fn probe_tunnels(&self, runtime: &mut Runtime, exits: &[Exit], verdicts: &mut [Verdict]) {
+        if self.config.dry_run {
+            return;
+        }
+        let mut probes = tokio::task::JoinSet::new();
+        for (index, (exit, verdict)) in exits.iter().zip(verdicts.iter()).enumerate() {
+            if policy::routable(&verdict.status) {
+                let mark = exit.mark;
+                probes.spawn(async move { (index, probe::run(mark).await) });
+            }
+        }
+        while let Some(result) = probes.join_next().await {
+            let Ok((index, outcome)) = result else {
+                continue;
+            };
+            let state = runtime.probes.entry(exits[index].id.clone()).or_default();
+            let verdict = std::mem::replace(&mut verdicts[index], failed(String::new()));
+            verdicts[index] = assess_probe(verdict, state, outcome);
+        }
+    }
+
     /// Existing conntrack entries keep the NAT and mark chosen for the old route, so a
     /// moved device would keep using it until each flow ends. Drop them instead.
     async fn reset_moved_connections(
@@ -489,6 +538,7 @@ impl Reconciler {
             runtime.slots.remove(&exit_id);
             runtime.tunnels.remove(&exit_id);
             runtime.created.remove(&exit_id);
+            runtime.probes.remove(&exit_id);
         }
     }
 
@@ -512,6 +562,63 @@ fn failed(detail: String) -> Verdict {
         status: ExitStatus::Failed,
         detail,
         rebuild: false,
+    }
+}
+
+fn assess_probe(verdict: Verdict, state: &mut ProbeState, outcome: probe::Outcome) -> Verdict {
+    match outcome.egress {
+        Ok(address) => {
+            state.egress_failures = 0;
+            state.public_ip = Some(address);
+        }
+        Err(error) => {
+            state.egress_failures += 1;
+            let failures = state.egress_failures;
+            if failures < PROBE_FAILURE_LIMIT {
+                return degrade(verdict, format!("traffic probe failed: {error}"));
+            }
+            return Verdict {
+                status: ExitStatus::Failed,
+                detail: format!(
+                    "handshakes succeed but no traffic passes ({failures} probes failed: {error}); the Proton certificate or session may be invalid"
+                ),
+                rebuild: verdict.rebuild
+                    || (failures - PROBE_FAILURE_LIMIT) % PROBE_REBUILD_EVERY == 0,
+            };
+        }
+    }
+    match outcome.resolver {
+        Ok(()) => {
+            state.resolver_failures = 0;
+            verdict
+        }
+        Err(error) => {
+            state.resolver_failures += 1;
+            if state.resolver_failures < PROBE_FAILURE_LIMIT {
+                return verdict;
+            }
+            degrade(
+                verdict,
+                format!("Proton DNS resolver not answering: {error}"),
+            )
+        }
+    }
+}
+
+/// Lower a healthy verdict to degraded, keeping any existing detail.
+fn degrade(verdict: Verdict, reason: String) -> Verdict {
+    let detail = if verdict.detail.is_empty() {
+        reason
+    } else {
+        format!("{}; {reason}", verdict.detail)
+    };
+    Verdict {
+        status: match verdict.status {
+            ExitStatus::Healthy => ExitStatus::Degraded,
+            status => status,
+        },
+        detail,
+        rebuild: verdict.rebuild,
     }
 }
 
@@ -705,6 +812,71 @@ mod tests {
         let never = classify(None, secs(120));
         assert_eq!(never.status, ExitStatus::Failed);
         assert!(never.rebuild);
+    }
+
+    fn healthy() -> Verdict {
+        classify(Some(Duration::from_secs(10)), Duration::from_secs(600))
+    }
+
+    fn outcome(egress: Result<Ipv4Addr, &str>, resolver: Result<(), &str>) -> probe::Outcome {
+        probe::Outcome {
+            egress: egress.map_err(String::from),
+            resolver: resolver.map_err(String::from),
+        }
+    }
+
+    #[test]
+    fn a_tunnel_that_passes_no_traffic_fails_despite_fresh_handshakes() {
+        let address = Ipv4Addr::new(146, 70, 86, 115);
+        let mut state = ProbeState::default();
+        let verdict = assess_probe(healthy(), &mut state, outcome(Ok(address), Ok(())));
+        assert_eq!(verdict, healthy());
+        assert_eq!(state.public_ip, Some(address));
+
+        let first = assess_probe(
+            healthy(),
+            &mut state,
+            outcome(Err("timeout"), Err("timeout")),
+        );
+        assert_eq!(first.status, ExitStatus::Degraded);
+        assert!(!first.rebuild);
+        let second = assess_probe(
+            healthy(),
+            &mut state,
+            outcome(Err("timeout"), Err("timeout")),
+        );
+        assert_eq!(second.status, ExitStatus::Failed);
+        assert!(second.rebuild);
+        assert!(second.detail.contains("no traffic passes"));
+        // Rebuilds are spaced out while the failure persists.
+        let rebuilds: Vec<bool> = (0..PROBE_REBUILD_EVERY)
+            .map(|_| assess_probe(healthy(), &mut state, outcome(Err("timeout"), Ok(()))).rebuild)
+            .collect();
+        assert_eq!(rebuilds.iter().filter(|rebuild| **rebuild).count(), 1);
+        assert!(rebuilds[rebuilds.len() - 1]);
+        // The last known address stays visible; one success recovers.
+        assert_eq!(state.public_ip, Some(address));
+        assert_eq!(
+            assess_probe(healthy(), &mut state, outcome(Ok(address), Ok(()))).status,
+            ExitStatus::Healthy
+        );
+        assert_eq!(state.egress_failures, 0);
+    }
+
+    #[test]
+    fn a_silent_proton_resolver_degrades_the_exit() {
+        let address = Ipv4Addr::new(146, 70, 86, 115);
+        let mut state = ProbeState::default();
+        let once = assess_probe(healthy(), &mut state, outcome(Ok(address), Err("timeout")));
+        assert_eq!(once.status, ExitStatus::Healthy);
+        let twice = assess_probe(healthy(), &mut state, outcome(Ok(address), Err("timeout")));
+        assert_eq!(twice.status, ExitStatus::Degraded);
+        assert!(twice.detail.contains("Proton DNS resolver"));
+        assert!(!twice.rebuild);
+        let degraded = classify(Some(Duration::from_secs(240)), Duration::from_secs(600));
+        let combined = assess_probe(degraded, &mut state, outcome(Ok(address), Err("timeout")));
+        assert!(combined.detail.starts_with("last handshake"));
+        assert!(combined.detail.contains("; Proton DNS resolver"));
     }
 
     #[test]

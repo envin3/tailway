@@ -6,10 +6,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use tailscale_exit_policy_router::alert::{self, Alerts};
 use tailscale_exit_policy_router::catalog::StaticCatalog;
 use tailscale_exit_policy_router::control::Api;
 use tailscale_exit_policy_router::dns::{self, DnsServer};
-use tailscale_exit_policy_router::domain::UnassignedPolicy;
+use tailscale_exit_policy_router::domain::{ExitStatus, UnassignedPolicy};
 use tailscale_exit_policy_router::platform::Runner;
 use tailscale_exit_policy_router::proton::AccountLimits;
 use tailscale_exit_policy_router::reconcile::{Config, DnsConfig, Reconciler};
@@ -17,7 +18,8 @@ use tailscale_exit_policy_router::state::Store;
 use tailscale_exit_policy_router::tailscale::Provider;
 use tokio::net::UnixListener;
 use tokio::process::{Child, Command};
-use tracing::{error, info};
+use tokio::sync::mpsc;
+use tracing::{error, info, warn};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -37,6 +39,7 @@ async fn main() -> Result<()> {
         ),
         environment("SECRETS_DIRECTORY", "/run/secrets/proton"),
     ));
+    let alerts = Arc::new(start_alerts()?);
     let devices = Arc::new(Provider::new(runner.clone()));
     let reconciler = Arc::new(Reconciler::new(
         Config {
@@ -76,12 +79,23 @@ async fn main() -> Result<()> {
     } else {
         None
     };
-    if let Err(error) = reconciler.reconcile().await {
+    alerts.info(
+        "agent",
+        "gateway agent started",
+        format!(
+            "Gateway agent {} started; routing is being restored.",
+            env!("CARGO_PKG_VERSION")
+        ),
+    );
+    let result = reconciler.reconcile().await;
+    if let Err(error) = &result {
         error!(%error, "initial reconciliation failed; forwarding remains closed");
     }
+    observe_health(&alerts, &reconciler, result.is_err()).await;
 
     let interval = parse_interval(&environment("RECONCILE_INTERVAL", "30s"));
     let loop_reconciler = reconciler.clone();
+    let loop_alerts = alerts.clone();
     let started = std::time::Instant::now();
     let reconcile_task = tokio::spawn(async move {
         loop {
@@ -90,9 +104,11 @@ async fn main() -> Result<()> {
             let starting = started.elapsed() < STARTUP_FAST_RETRY_WINDOW
                 && !loop_reconciler.tailscale_running().await;
             tokio::time::sleep(if starting { STARTUP_RETRY } else { interval }).await;
-            if let Err(error) = loop_reconciler.reconcile().await {
+            let result = loop_reconciler.reconcile().await;
+            if let Err(error) = &result {
                 error!(%error, "reconciliation failed; forwarding remains closed");
             }
+            observe_health(&loop_alerts, &loop_reconciler, result.is_err()).await;
         }
     });
 
@@ -119,7 +135,8 @@ async fn main() -> Result<()> {
         "PROTON_BROKER_SOCKET",
         "/run/tailscale-exit-policy-router/proton.sock",
     )));
-    let router = Api::new(store, catalog, devices, reconciler, account_limits).router();
+    let account_task = tokio::spawn(watch_account(account_limits.clone(), alerts.clone()));
+    let router = Api::new(store, catalog, devices, reconciler, account_limits, alerts).router();
     let mut gateway_ui = start_gateway_ui()?;
     let server = async move {
         axum::serve(listener, router)
@@ -135,6 +152,7 @@ async fn main() -> Result<()> {
         },
     };
     reconcile_task.abort();
+    account_task.abort();
     let _ = gateway_ui.start_kill();
     let _ = gateway_ui.wait().await;
     if let Some(child) = tailscaled.as_mut() {
@@ -162,11 +180,16 @@ async fn start_tailscaled() -> Result<Child> {
     if let Some(directory) = state_path.parent() {
         fs::create_dir_all(directory)?;
     }
+    // The listen port must equal the published host port: Tailscale advertises
+    // its own port as an endpoint, and a mismatch breaks direct connections.
+    let port: u16 = environment("TAILSCALE_PORT", "41641")
+        .parse()
+        .context("parse TAILSCALE_PORT")?;
     Command::new("tailscaled")
         .arg(format!("--state={}", state_path.display()))
         .arg("--socket=/var/run/tailscale/tailscaled.sock")
         .arg("--tun=tailscale0")
-        .arg("--port=41641")
+        .arg(format!("--port={port}"))
         .spawn()
         .context("start tailscaled")
 }
@@ -188,6 +211,113 @@ async fn shutdown_signal() {
     tokio::select! {
         _ = interrupt => {},
         _ = terminate => {},
+    }
+}
+
+/// How long a condition must persist before it is notified. Exit failures are
+/// already debounced by the health checks, so they are reported at once.
+const RECONCILE_ALERT_GRACE: Duration = Duration::from_secs(90);
+const TAILSCALE_ALERT_GRACE: Duration = Duration::from_secs(180);
+const PROTON_ALERT_GRACE: Duration = Duration::from_secs(600);
+const ACCOUNT_POLL_INTERVAL: Duration = Duration::from_secs(300);
+/// Certificates last about a week and are renewed with days to spare; one this
+/// close to expiry means renewal is failing.
+const CERTIFICATE_ALERT_SECONDS: i64 = 24 * 3600;
+
+fn start_alerts() -> Result<Alerts> {
+    let Some(url) = env::var("ALERT_WEBHOOK_URL")
+        .ok()
+        .filter(|url| !url.is_empty())
+    else {
+        info!("ALERT_WEBHOOK_URL not set; alerts are logged and shown in the status API only");
+        return Ok(Alerts::new(None));
+    };
+    let format: alert::Format = environment("ALERT_WEBHOOK_FORMAT", "ntfy").parse()?;
+    let source = environment("ALERT_SOURCE", "tailscale-exit-policy-router");
+    let (sender, queue) = mpsc::channel(alert::QUEUE_LENGTH);
+    tokio::spawn(alert::deliver(queue, url, format, source));
+    Ok(Alerts::new(Some(sender)))
+}
+
+async fn observe_health(alerts: &Alerts, reconciler: &Reconciler, reconcile_failed: bool) {
+    let (exits, last_error) = reconciler.snapshot().await;
+    alerts.observe(
+        "reconcile",
+        reconcile_failed.then(|| format!("Reconciliation is failing: {last_error}")),
+        RECONCILE_ALERT_GRACE,
+    );
+    alerts.observe(
+        "tailscale",
+        (!reconciler.tailscale_running().await).then(|| {
+            "Tailscale is not running on the gateway; exit routing and DNS are unavailable."
+                .to_owned()
+        }),
+        TAILSCALE_ALERT_GRACE,
+    );
+    let mut keys = Vec::with_capacity(exits.len());
+    for exit in &exits {
+        let key = format!("exit:{}", exit.display_name);
+        alerts.observe(
+            &key,
+            (exit.status == ExitStatus::Failed).then(|| {
+                format!(
+                    "{} ({}) failed; its devices are blocked. {}",
+                    exit.display_name, exit.server_id, exit.status_detail
+                )
+            }),
+            Duration::ZERO,
+        );
+        keys.push(key);
+    }
+    alerts.retain("exit:", &keys);
+}
+
+async fn watch_account(account_limits: Arc<AccountLimits>, alerts: Arc<Alerts>) {
+    loop {
+        let (session, certificate) = match account_limits.account().await {
+            Err(error) => (
+                Some(format!(
+                    "The Proton account broker is unreachable: {error:#}"
+                )),
+                None,
+            ),
+            Ok(account) if !account.authenticated() => (
+                Some(format!(
+                    "The Proton session is {}; certificates cannot be renewed. Sign in again in the console.",
+                    account.state
+                )),
+                None,
+            ),
+            Ok(account) => (
+                None,
+                certificate_problem(
+                    account.certificate_valid_seconds,
+                    account.background_refresh,
+                ),
+            ),
+        };
+        if let Some(problem) = &session {
+            warn!(%problem, "Proton account check failed");
+        }
+        alerts.observe("proton-session", session, PROTON_ALERT_GRACE);
+        alerts.observe("proton-certificate", certificate, Duration::ZERO);
+        tokio::time::sleep(ACCOUNT_POLL_INTERVAL).await;
+    }
+}
+
+fn certificate_problem(valid_seconds: Option<i64>, background_refresh: bool) -> Option<String> {
+    if !background_refresh {
+        return Some(
+            "Proton certificate renewal is not running; tunnels stop passing traffic when the certificate expires."
+                .into(),
+        );
+    }
+    match valid_seconds {
+        Some(seconds) if seconds < CERTIFICATE_ALERT_SECONDS => Some(format!(
+            "The Proton certificate expires in {}h and has not been renewed.",
+            seconds.max(0) / 3600
+        )),
+        _ => None,
     }
 }
 

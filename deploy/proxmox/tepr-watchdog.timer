@@ -1,0 +1,10 @@
+[Unit]
+Description=Run the Tailscale exit policy router watchdog every two minutes
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=2min
+AccuracySec=15s
+
+[Install]
+WantedBy=timers.target
