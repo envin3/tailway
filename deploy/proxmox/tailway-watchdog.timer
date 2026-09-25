@@ -1,5 +1,5 @@
 [Unit]
-Description=Run the Tailscale exit policy router watchdog every two minutes
+Description=Run the Tailway watchdog every two minutes
 
 [Timer]
 OnBootSec=5min

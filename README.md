@@ -1,4 +1,4 @@
-# Proton Policy Router
+# Tailway
 
 Experimental IPv4 Tailscale exit-node gateway for Linux container hosts. One Tailscale identity classifies devices by stable node ID and routes each assigned device through a selected Proton WireGuard exit. Unraid is one deployment option.
 
@@ -27,7 +27,7 @@ These are release gates, not optional enhancements. Follow [docs/spikes/README.m
 
 ## Prepare the host
 
-Copy this directory to persistent storage on a Linux Docker Compose host, then run commands from that directory. On Unraid, `/mnt/user/appdata/tailscale-exit-policy-router` is a suitable location.
+Copy this directory to persistent storage on a Linux Docker Compose host, then run commands from that directory. On Unraid, `/mnt/user/appdata/tailway` is a suitable location.
 
 ```sh
 cp .env.example .env
@@ -72,7 +72,7 @@ The console refuses to start without TLS. Publish port `8443` only on a trusted 
 ```sh
 docker compose build
 docker compose up -d gateway-agent
-docker compose exec gateway-agent tailscale up --advertise-exit-node --accept-dns=false --netfilter-mode=off
+docker compose exec gateway-agent tailscale up --hostname=tailway --advertise-exit-node --accept-dns=false --netfilter-mode=off
 ```
 
 To run an image built elsewhere (for example a test host without the source tree), copy `compose.yaml` and `.env`, load the tagged images with `docker load`, set `IMAGE_TAG`, and start with `docker compose up -d --no-build`.
@@ -82,7 +82,7 @@ Approve the exit-node advertisement in the Tailscale admin console. Enrollment s
 Check that the baseline and supervised UI are active:
 
 ```sh
-docker compose exec gateway-agent nft list table inet tailscale_exit_policy_router
+docker compose exec gateway-agent nft list table inet tailway
 docker compose exec gateway-agent ip rule show
 docker compose top gateway-agent
 ```
@@ -201,10 +201,10 @@ The agent also sends an info message whenever it starts, so restarts are visible
 The agent cannot report its own absence. On a Proxmox host, `deploy/proxmox/` has a watchdog that runs every two minutes. It alerts when the gateway LXC is stopped, when either container is missing or unhealthy, or when the gateway's tailnet DNS stops answering. It reads the same `state/alerts.json`, so it uses the channels configured on the console. It alerts after two consecutive failures and again on recovery:
 
 ```sh
-install -m 755 deploy/proxmox/tepr-watchdog.sh /usr/local/sbin/tepr-watchdog
-install -m 644 deploy/proxmox/tepr-watchdog.{service,timer} /etc/systemd/system/
-printf 'CTID=103\nGATEWAY_DNS=<gateway tailnet IP>\nALERT_SETTINGS=<app directory>/state/alerts.json\n' > /etc/default/tepr-watchdog
-systemctl daemon-reload && systemctl enable --now tepr-watchdog.timer
+install -m 755 deploy/proxmox/tailway-watchdog.sh /usr/local/sbin/tailway-watchdog
+install -m 644 deploy/proxmox/tailway-watchdog.{service,timer} /etc/systemd/system/
+printf 'CTID=103\nGATEWAY_DNS=<gateway tailnet IP>\nALERT_SETTINGS=<app directory>/state/alerts.json\n' > /etc/default/tailway-watchdog
+systemctl daemon-reload && systemctl enable --now tailway-watchdog.timer
 ```
 
 ## Availability and recovery

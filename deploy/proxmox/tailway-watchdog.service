@@ -1,0 +1,7 @@
+[Unit]
+Description=Tailway watchdog
+After=pve-guests.service tailscaled.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/tailway-watchdog

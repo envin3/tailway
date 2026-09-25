@@ -13,14 +13,14 @@ Store dated evidence under an ignored `docs/spikes/evidence/` directory. Include
    ```sh
    mkdir -p docs/spikes/evidence
    docker run --rm \
-     --network container:tailscale-exit-policy-router-agent \
+     --network container:tailway-agent \
      --cap-drop ALL \
      --cap-add NET_RAW \
      --cap-add SETUID \
      --cap-add SETGID \
      -v "$PWD/docs/spikes/evidence:/evidence" \
      --entrypoint timeout \
-     "local/tailscale-exit-policy-router-agent:${IMAGE_TAG:-dev}" \
+     "local/tailway-agent:${IMAGE_TAG:-dev}" \
      60 tcpdump -nn -i tailscale0 -w /evidence/source-identity.pcap
    ```
 

@@ -168,9 +168,9 @@ pub fn compile(input: Input<'_>) -> Result<Compiled> {
 
     let inverse_mask = !MARK_MASK;
     let mut output = String::new();
-    writeln!(output, "table inet tailscale_exit_policy_router")?;
-    writeln!(output, "flush table inet tailscale_exit_policy_router")?;
-    writeln!(output, "table inet tailscale_exit_policy_router {{")?;
+    writeln!(output, "table inet tailway")?;
+    writeln!(output, "flush table inet tailway")?;
+    writeln!(output, "table inet tailway {{")?;
     writeln!(output, "  chain forward {{")?;
     writeln!(
         output,

@@ -4,13 +4,13 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light dark">
-  <title>Exit Gateway</title>
+  <title>Tailway</title>
   <link rel="stylesheet" href="/styles.css">
 </head>
 <body>
   <div class="app">
     <aside class="sidebar" id="sidebar">
-      <div class="brand"><span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 2 4 5v6c0 5 3.4 9.4 8 11 4.6-1.6 8-6 8-11V5l-8-3Z"/></svg></span><span>Exit Gateway</span></div>
+      <div class="brand"><span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 2 4 5v6c0 5 3.4 9.4 8 11 4.6-1.6 8-6 8-11V5l-8-3Z"/></svg></span><span>Tailway</span></div>
       <nav class="nav" aria-label="Main">
         <a href="#/dashboard" data-nav="dashboard"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M4 13h6V4H4v9Zm0 7h6v-5H4v5Zm10 0h6v-9h-6v9Zm0-16v5h6V4h-6Z"/></svg><span>Dashboard</span></a>
         <a href="#/devices" data-nav="devices"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M4 6h16v10H4V6Zm-2 12h20v2H2v-2Z"/></svg><span>Devices</span><span class="nav-count" id="nav-device-count"></span></a>
@@ -147,7 +147,7 @@
                   <label class="field"><span>Security</span><select id="smtp-security"><option value="starttls">STARTTLS (usually port 587)</option><option value="tls">TLS (usually port 465)</option><option value="none">None (local relay only)</option></select></label>
                   <label class="field"><span>SMTP username</span><input id="smtp-username" autocomplete="off" spellcheck="false" maxlength="254"></label>
                   <label class="field"><span>SMTP password</span><input id="smtp-password" type="password" autocomplete="new-password" maxlength="256"></label>
-                  <label class="field"><span>From <em>optional</em></span><input id="smtp-from" autocomplete="off" spellcheck="false" maxlength="320" placeholder="Exit Gateway &lt;you@example.com&gt;"></label>
+                  <label class="field"><span>From <em>optional</em></span><input id="smtp-from" autocomplete="off" spellcheck="false" maxlength="320" placeholder="Tailway &lt;you@example.com&gt;"></label>
                 </div>
                 <label class="field"><span>Current console password</span><input id="mail-current-password" type="password" autocomplete="current-password" required maxlength="128"></label>
                 <div class="actions"><button>Save</button><button type="button" id="mail-test" class="secondary">Save and send test email</button></div>

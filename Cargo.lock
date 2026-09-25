@@ -1274,7 +1274,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "tailscale-exit-policy-router"
+name = "tailway"
 version = "0.1.0"
 dependencies = [
  "anyhow",

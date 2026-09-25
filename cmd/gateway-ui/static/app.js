@@ -735,7 +735,7 @@ const route = () => {
     else link.removeAttribute("aria-current");
   });
   $("#page-title").textContent = VIEWS[state.view];
-  document.title = `${VIEWS[state.view]} · Exit Gateway`;
+  document.title = `${VIEWS[state.view]} · Tailway`;
   closeMenu();
   render({ force: true });
   window.scrollTo(0, 0);

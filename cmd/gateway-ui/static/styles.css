@@ -1,4 +1,4 @@
-/* Exit Gateway console. No external assets: the console is served from the
+/* Tailway console. No external assets: the console is served from the
    gateway itself under a self-only content security policy. */
 
 :root {

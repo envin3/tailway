@@ -25,8 +25,8 @@ use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
-use tailscale_exit_policy_router::account::{self, Account, AccountStore};
-use tailscale_exit_policy_router::mail::{EmailRecovery, Security, Smtp};
+use tailway::account::{self, Account, AccountStore};
+use tailway::mail::{EmailRecovery, Security, Smtp};
 use tokio::net::UnixStream;
 use tokio::sync::Mutex;
 use tracing::{info, warn};
@@ -37,7 +37,7 @@ const LOGIN_HTML: &str = include_str!("../../cmd/gateway-ui/static/login.html");
 const LOGIN_JS: &str = include_str!("../../cmd/gateway-ui/static/login.js");
 const STYLES_CSS: &str = include_str!("../../cmd/gateway-ui/static/styles.css");
 
-const SESSION_COOKIE: &str = "tepr_session";
+const SESSION_COOKIE: &str = "tailway_session";
 const SESSION_IDLE_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const SESSION_LIFETIME: Duration = Duration::from_secs(12 * 60 * 60);
 const MAX_SESSIONS: usize = 64;
@@ -107,13 +107,10 @@ async fn main() -> Result<()> {
         None
     };
     let state = Arc::new(UiState {
-        socket_path: PathBuf::from(environment(
-            "CONTROL_SOCKET",
-            "/run/tailscale-exit-policy-router/control.sock",
-        )),
+        socket_path: PathBuf::from(environment("CONTROL_SOCKET", "/run/tailway/control.sock")),
         proton_socket_path: PathBuf::from(environment(
             "PROTON_BROKER_SOCKET",
-            "/run/tailscale-exit-policy-router/proton.sock",
+            "/run/tailway/proton.sock",
         )),
         accounts,
         bcrypt_cost: account::BCRYPT_COST,
@@ -523,7 +520,7 @@ async fn logout(
     response.headers_mut().append(
         header::SET_COOKIE,
         HeaderValue::from_static(
-            "tepr_session=; Path=/; Max-Age=0; Secure; HttpOnly; SameSite=Strict",
+            "tailway_session=; Path=/; Max-Age=0; Secure; HttpOnly; SameSite=Strict",
         ),
     );
     response
@@ -1677,7 +1674,7 @@ mod tests {
     fn recovery_settings(port: u16) -> Value {
         json!({
             "email": "envin@example.com",
-            "smtp": {"host": "127.0.0.1", "port": port, "security": "none", "from": "Exit Gateway <gateway@example.com>"},
+            "smtp": {"host": "127.0.0.1", "port": port, "security": "none", "from": "Tailway <gateway@example.com>"},
         })
     }
 
@@ -2014,7 +2011,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::GATEWAY_TIMEOUT);
         let forwarded = receiver.await.unwrap();
         assert!(forwarded.starts_with("get /v1/status"));
-        for secret in ["authorization", "tepr_session", "x-csrf-token"] {
+        for secret in ["authorization", "tailway_session", "x-csrf-token"] {
             assert!(
                 !forwarded.contains(secret),
                 "{secret} forwarded:\n{forwarded}"
@@ -2028,12 +2025,12 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert(
             header::COOKIE,
-            HeaderValue::from_static("theme=dark; tepr_session=abc123; other=1"),
+            HeaderValue::from_static("theme=dark; tailway_session=abc123; other=1"),
         );
         assert_eq!(session_token(&headers), Some("abc123"));
         headers.insert(
             header::COOKIE,
-            HeaderValue::from_static("tepr_session_x=nope"),
+            HeaderValue::from_static("tailway_session_x=nope"),
         );
         assert_eq!(session_token(&headers), None);
     }

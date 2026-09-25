@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Watchdog for the gateway, run on the Proxmox host by tepr-watchdog.timer.
+# Watchdog for the gateway, run on the Proxmox host by tailway-watchdog.timer.
 # The agent alerts on its own problems; this covers the agent being unable to:
 # the LXC stopped, a container unhealthy or gone, or tailnet DNS not answering.
 # A check alerts after FAILURES_BEFORE_ALERT consecutive failures and again when
@@ -7,27 +7,27 @@
 # lives in /run, so nothing is written to the boot disk.
 set -uo pipefail
 
-CONFIG=${TEPR_WATCHDOG_CONFIG:-/etc/default/tepr-watchdog}
+CONFIG=${TAILWAY_WATCHDOG_CONFIG:-/etc/default/tailway-watchdog}
 # shellcheck source=/dev/null
 [[ -r $CONFIG ]] && . "$CONFIG"
 
 CTID=${CTID:-103}
-CONTAINERS=${CONTAINERS:-"tailscale-exit-policy-router-agent tailscale-exit-policy-router-broker"}
+CONTAINERS=${CONTAINERS:-"tailway-agent tailway-broker"}
 GATEWAY_DNS=${GATEWAY_DNS:-}
 DNS_PROBE_NAME=${DNS_PROBE_NAME:-example.com}
 FAILURES_BEFORE_ALERT=${FAILURES_BEFORE_ALERT:-2}
 # The alert channels configured on the console's Alerts page.
-ALERT_SETTINGS=${ALERT_SETTINGS:-/mnt/main/appdata/tailscale-exit-policy-router/state/alerts.json}
+ALERT_SETTINGS=${ALERT_SETTINGS:-/mnt/main/appdata/tailway/state/alerts.json}
 ALERT_SOURCE=${ALERT_SOURCE:-$(hostname)-watchdog}
-STATE_DIR=${STATE_DIR:-/run/tepr-watchdog}
+STATE_DIR=${STATE_DIR:-/run/tailway-watchdog}
 
 mkdir -p "$STATE_DIR"
 
 notify() { # kind title message
     local kind=$1 title=$2 message=$3
-    logger -t tepr-watchdog "$kind: $title: $message"
+    logger -t tailway-watchdog "$kind: $title: $message"
     [[ -r $ALERT_SETTINGS ]] || return 0
-    python3 - "$ALERT_SETTINGS" "$ALERT_SOURCE" "$kind" "$title" "$message" <<'PY' || logger -t tepr-watchdog "alert delivery failed"
+    python3 - "$ALERT_SETTINGS" "$ALERT_SOURCE" "$kind" "$title" "$message" <<'PY' || logger -t tailway-watchdog "alert delivery failed"
 import json
 import sys
 import urllib.request

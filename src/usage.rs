@@ -16,7 +16,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use serde::Deserialize;
 
-pub const TABLE: &str = "tailscale_exit_policy_router_usage";
+pub const TABLE: &str = "tailway_usage";
 pub const SET: &str = "clients";
 /// How long after its last packet a device still counts as using the gateway.
 pub const WINDOW: Duration = Duration::from_secs(15 * 60);
@@ -93,7 +93,7 @@ mod tests {
     #[test]
     fn records_only_tailnet_sources_sending_to_the_internet() {
         let ruleset = ruleset("tailscale0");
-        assert!(ruleset.contains("flush chain inet tailscale_exit_policy_router_usage forward"));
+        assert!(ruleset.contains("flush chain inet tailway_usage forward"));
         assert!(!ruleset.contains("flush table"));
         assert!(ruleset.contains("policy accept;"));
         assert!(ruleset.contains("timeout 900s"));
@@ -104,7 +104,7 @@ mod tests {
     #[test]
     fn parses_the_time_since_last_traffic() {
         // Captured from nftables 1.0.6.
-        let json = br#"{"nftables": [{"metainfo": {"version": "1.0.6", "json_schema_version": 1}}, {"set": {"family": "inet", "name": "clients", "table": "tailscale_exit_policy_router_usage", "type": "ipv4_addr", "handle": 1, "size": 4096, "flags": ["timeout"], "timeout": 900, "elem": [{"elem": {"val": "100.64.0.99", "expires": 896}}, {"elem": {"val": "100.64.0.7", "timeout": 600, "expires": 100}}, "100.64.0.8", {"elem": {"val": "not-an-address", "expires": 1}}]}}]}"#;
+        let json = br#"{"nftables": [{"metainfo": {"version": "1.0.6", "json_schema_version": 1}}, {"set": {"family": "inet", "name": "clients", "table": "tailway_usage", "type": "ipv4_addr", "handle": 1, "size": 4096, "flags": ["timeout"], "timeout": 900, "elem": [{"elem": {"val": "100.64.0.99", "expires": 896}}, {"elem": {"val": "100.64.0.7", "timeout": 600, "expires": 100}}, "100.64.0.8", {"elem": {"val": "not-an-address", "expires": 1}}]}}]}"#;
         let usage = parse(json).unwrap();
         assert_eq!(usage.len(), 3);
         assert_eq!(usage[&Ipv4Addr::new(100, 64, 0, 99)], 4);

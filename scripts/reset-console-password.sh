@@ -8,7 +8,7 @@
 # LXC runs it (found through pct; set GATEWAY_CTID if it is not 103).
 set -eu
 
-container=${AGENT_CONTAINER:-tailscale-exit-policy-router-agent}
+container=${AGENT_CONTAINER:-tailway-agent}
 control_gid=${CONTROL_GID:-1000}
 ctid=${GATEWAY_CTID:-103}
 

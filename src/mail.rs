@@ -37,7 +37,7 @@ pub struct Smtp {
     pub username: String,
     #[serde(default)]
     pub password: String,
-    /// Sender, e.g. `Exit Gateway <gateway@example.com>`.
+    /// Sender, e.g. `Tailway <gateway@example.com>`.
     pub from: String,
 }
 
@@ -90,7 +90,7 @@ impl EmailRecovery {
         self.send(
             "Console password reset code",
             format!(
-                "Your password reset code for the Exit Gateway console\n({console}) is:\n\n    {code}\n\nIt expires in 10 minutes and works once.\n\nIf you did not ask for it, someone is trying to reset the\nconsole password. Nothing changes unless the code is used.\n"
+                "Your password reset code for the Tailway console\n({console}) is:\n\n    {code}\n\nIt expires in 10 minutes and works once.\n\nIf you did not ask for it, someone is trying to reset the\nconsole password. Nothing changes unless the code is used.\n"
             ),
         )
         .await
@@ -100,7 +100,7 @@ impl EmailRecovery {
         self.send(
             "Console password recovery test",
             format!(
-                "Password reset codes for the Exit Gateway console\n({console}) will be sent to this address.\n"
+                "Password reset codes for the Tailway console\n({console}) will be sent to this address.\n"
             ),
         )
         .await
@@ -150,7 +150,7 @@ mod tests {
                 security: Security::None,
                 username: String::new(),
                 password: String::new(),
-                from: "Exit Gateway <gateway@example.com>".into(),
+                from: "Tailway <gateway@example.com>".into(),
             },
         }
     }

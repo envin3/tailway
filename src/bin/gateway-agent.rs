@@ -6,17 +6,17 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use tailscale_exit_policy_router::alert::{self, Alerts};
-use tailscale_exit_policy_router::catalog::StaticCatalog;
-use tailscale_exit_policy_router::control::Api;
-use tailscale_exit_policy_router::dns::{self, DnsServer};
-use tailscale_exit_policy_router::domain::{ExitStatus, UnassignedPolicy};
-use tailscale_exit_policy_router::notify::{self, Notifier, SettingsStore};
-use tailscale_exit_policy_router::platform::Runner;
-use tailscale_exit_policy_router::proton::AccountLimits;
-use tailscale_exit_policy_router::reconcile::{Config, DnsConfig, Reconciler};
-use tailscale_exit_policy_router::state::Store;
-use tailscale_exit_policy_router::tailscale::Provider;
+use tailway::alert::{self, Alerts};
+use tailway::catalog::StaticCatalog;
+use tailway::control::Api;
+use tailway::dns::{self, DnsServer};
+use tailway::domain::{ExitStatus, UnassignedPolicy};
+use tailway::notify::{self, Notifier, SettingsStore};
+use tailway::platform::Runner;
+use tailway::proton::AccountLimits;
+use tailway::reconcile::{Config, DnsConfig, Reconciler};
+use tailway::state::Store;
+use tailway::tailscale::Provider;
 use tokio::net::UnixListener;
 use tokio::process::{Child, Command};
 use tokio::sync::mpsc;
@@ -31,13 +31,10 @@ async fn main() -> Result<()> {
     let runner = Runner::new(dry_run);
     let store = Arc::new(Store::new(environment(
         "STATE_PATH",
-        "/var/lib/tailscale-exit-policy-router/desired.json",
+        "/var/lib/tailway/desired.json",
     )));
     let catalog = Arc::new(StaticCatalog::new(
-        environment(
-            "CATALOG_PATH",
-            "/etc/tailscale-exit-policy-router/catalog.json",
-        ),
+        environment("CATALOG_PATH", "/etc/tailway/catalog.json"),
         environment("SECRETS_DIRECTORY", "/run/secrets/proton"),
     ));
     let (alerts, notifier) = start_alerts()?;
@@ -46,10 +43,7 @@ async fn main() -> Result<()> {
         Config {
             wan_interface: environment("WAN_INTERFACE", "eth0"),
             tailscale_interface: environment("TAILSCALE_INTERFACE", "tailscale0"),
-            runtime_directory: PathBuf::from(environment(
-                "RUNTIME_DIRECTORY",
-                "/run/tailscale-exit-policy-router",
-            )),
+            runtime_directory: PathBuf::from(environment("RUNTIME_DIRECTORY", "/run/tailway")),
             dry_run,
             unassigned,
             dns: dns_config,
@@ -113,10 +107,7 @@ async fn main() -> Result<()> {
         }
     });
 
-    let socket_path = PathBuf::from(environment(
-        "CONTROL_SOCKET",
-        "/run/tailscale-exit-policy-router/control.sock",
-    ));
+    let socket_path = PathBuf::from(environment("CONTROL_SOCKET", "/run/tailway/control.sock"));
     if let Some(directory) = socket_path.parent() {
         let created = !directory.exists();
         fs::create_dir_all(directory).context("create control socket directory")?;
@@ -134,7 +125,7 @@ async fn main() -> Result<()> {
 
     let account_limits = Arc::new(AccountLimits::new(environment(
         "PROTON_BROKER_SOCKET",
-        "/run/tailscale-exit-policy-router/proton.sock",
+        "/run/tailway/proton.sock",
     )));
     let account_task = tokio::spawn(watch_account(account_limits.clone(), alerts.clone()));
     let router = Api::new(
@@ -236,15 +227,12 @@ const CERTIFICATE_ALERT_SECONDS: i64 = 24 * 3600;
 
 fn start_alerts() -> Result<(Arc<Alerts>, Arc<Notifier>)> {
     let settings = Arc::new(SettingsStore::open(
-        environment(
-            "ALERT_SETTINGS_PATH",
-            "/var/lib/tailscale-exit-policy-router/alerts.json",
-        ),
+        environment("ALERT_SETTINGS_PATH", "/var/lib/tailway/alerts.json"),
         notify::seed_from_environment()?,
     )?);
     let notifier = Arc::new(Notifier::new(
         settings,
-        environment("ALERT_SOURCE", "tailscale-exit-policy-router"),
+        environment("ALERT_SOURCE", "tailway"),
     )?);
     let (sender, queue) = mpsc::channel(alert::QUEUE_LENGTH);
     tokio::spawn(notifier.clone().run(queue));
