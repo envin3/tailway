@@ -206,13 +206,15 @@ async fn get_exits(State(api): State<Arc<Api>>) -> Response {
         Err(error) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, error),
     };
     let (runtime_exits, _) = api.reconciler.snapshot().await;
-    let statuses: HashMap<_, _> = runtime_exits
+    let mut observed: HashMap<_, _> = runtime_exits
         .into_iter()
-        .map(|exit| (exit.id, exit.status))
+        .map(|exit| (exit.id.clone(), exit))
         .collect();
     for exit in &mut desired.exits {
-        if let Some(status) = statuses.get(&exit.id) {
-            exit.status = status.clone();
+        if let Some(runtime) = observed.remove(&exit.id) {
+            exit.status = runtime.status;
+            exit.status_detail = runtime.status_detail;
+            exit.public_ip = runtime.public_ip;
         }
     }
     json_response(
