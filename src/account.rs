@@ -108,6 +108,33 @@ impl AccountStore {
         self.directory.join(ACCOUNT_FILE)
     }
 
+    /// Whether an account (or a legacy password hash) has been set up.
+    pub fn exists(&self) -> bool {
+        self.account_path().exists() || self.directory.join(LEGACY_HASH_FILE).exists()
+    }
+
+    /// Saves the first account; fails if any account already exists, even one
+    /// created by another request at the same moment.
+    pub fn create(&self, account: &Account) -> Result<()> {
+        if self.directory.join(LEGACY_HASH_FILE).exists() {
+            bail!("an account already exists");
+        }
+        validate_username(&account.username)?;
+        fs::create_dir_all(&self.directory)?;
+        let mut temporary = tempfile::NamedTempFile::new_in(&self.directory)?;
+        std::io::Write::write_all(&mut temporary, &serde_json::to_vec_pretty(account)?)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(temporary.path(), fs::Permissions::from_mode(0o600))?;
+        }
+        temporary.as_file().sync_all()?;
+        temporary
+            .persist_noclobber(self.account_path())
+            .map_err(|_| anyhow::anyhow!("an account already exists"))?;
+        Ok(())
+    }
+
     /// The current account; cheap when the file has not changed.
     pub fn load(&self) -> Result<Account> {
         let path = self.account_path();
@@ -254,6 +281,27 @@ mod tests {
                 .mode();
             assert_eq!(mode & 0o777, 0o600);
         }
+    }
+
+    #[test]
+    fn creates_only_the_first_account() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = AccountStore::new(directory.path());
+        assert!(!store.exists());
+        store.create(&account("admin", "first account pw")).unwrap();
+        assert!(store.exists());
+        assert!(store.load().unwrap().verify("first account pw"));
+        let error = store
+            .create(&account("other", "second account pw"))
+            .unwrap_err();
+        assert_eq!(error.to_string(), "an account already exists");
+        assert_eq!(store.load().unwrap().username, "admin");
+
+        let legacy = tempfile::tempdir().unwrap();
+        fs::write(legacy.path().join(LEGACY_HASH_FILE), "$2b$04$hash").unwrap();
+        let store = AccountStore::new(legacy.path());
+        assert!(store.exists());
+        assert!(store.create(&account("admin", "first account pw")).is_err());
     }
 
     #[test]

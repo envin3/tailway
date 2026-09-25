@@ -12,7 +12,7 @@ const message = (text, kind = "") => {
 };
 
 const show = form => {
-  for (const id of ["#login-form", "#recovery-form"]) document.querySelector(id).classList.toggle("hidden", id !== form);
+  for (const id of ["#signup-form", "#login-form", "#recovery-form"]) document.querySelector(id).classList.toggle("hidden", id !== form);
   message("");
   document.querySelector(`${form} input`).focus();
 };
@@ -59,3 +59,33 @@ document.querySelector("#recovery-form").addEventListener("submit", async event 
     message(error.message, "bad");
   }
 });
+
+document.querySelector("#signup-form").addEventListener("submit", async event => {
+  event.preventDefault();
+  const password = document.querySelector("#signup-password").value;
+  if (password !== document.querySelector("#signup-confirm").value) return message("The passwords do not match.", "bad");
+  message("Creating the account…");
+  try {
+    await post("/auth/signup", { username: document.querySelector("#signup-username").value.trim(), password });
+    location.replace("/");
+  } catch (error) {
+    message(error.message, "bad");
+    // Someone else may have created the account in the meantime.
+    checkAccount();
+  }
+});
+
+// Offer sign-up while no account exists; otherwise the sign-in form.
+const checkAccount = async () => {
+  try {
+    const response = await fetch("/auth/status", { cache: "no-store" });
+    const { accountExists } = await response.json();
+    const signupVisible = !document.querySelector("#signup-form").classList.contains("hidden");
+    if (!accountExists && !signupVisible) show("#signup-form");
+    if (accountExists && signupVisible) {
+      show("#login-form");
+      message("An account already exists; sign in.", "bad");
+    }
+  } catch (_) { /* keep the sign-in form */ }
+};
+checkAccount();

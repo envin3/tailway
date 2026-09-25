@@ -61,6 +61,8 @@ struct UiState {
     sessions: Mutex<HashMap<[u8; 32], Session>>,
     failures: Mutex<HashMap<String, Vec<Instant>>>,
     recovery: Mutex<Recovery>,
+    /// Serializes sign-up so only one first account can be created.
+    signup: Mutex<()>,
 }
 
 struct Session {
@@ -98,7 +100,12 @@ async fn main() -> Result<()> {
         return reset_password(&arguments[1..]);
     }
     let accounts = AccountStore::new(account_directory());
-    let account = accounts.load()?;
+    // Without an account the console still starts, offering sign-up.
+    let username = if accounts.exists() {
+        Some(accounts.load()?.username)
+    } else {
+        None
+    };
     let state = Arc::new(UiState {
         socket_path: PathBuf::from(environment(
             "CONTROL_SOCKET",
@@ -113,6 +120,7 @@ async fn main() -> Result<()> {
         sessions: Mutex::new(HashMap::new()),
         failures: Mutex::new(HashMap::new()),
         recovery: Mutex::new(Recovery::default()),
+        signup: Mutex::new(()),
     });
     let address = parse_address(&environment("LISTEN_ADDRESS", ":8443"))?;
     let tls = RustlsConfig::from_pem_file(
@@ -120,7 +128,13 @@ async fn main() -> Result<()> {
         required_environment("TLS_KEY_FILE")?,
     )
     .await?;
-    info!(%address, username = %account.username, "gateway console ready");
+    match &username {
+        Some(username) => info!(%address, %username, "gateway console ready"),
+        None => warn!(
+            %address,
+            "gateway console ready with no account: the first visitor creates it; open the console now"
+        ),
+    }
     axum_server::bind_rustls(address, tls)
         .serve(router(state).into_make_service_with_connect_info::<SocketAddr>())
         .await?;
@@ -160,6 +174,9 @@ fn reset_password(arguments: &[String]) -> Result<()> {
 fn router(state: Arc<UiState>) -> Router {
     let public = Router::new()
         .route("/login", get(login_page))
+        .route("/signup", get(login_page))
+        .route("/auth/status", get(auth_status))
+        .route("/auth/signup", post(signup))
         .route("/login.js", get(login_js))
         .route("/styles.css", get(styles_css))
         .route("/auth/login", post(login))
@@ -401,6 +418,48 @@ fn too_many_attempts() -> Response {
     )
 }
 
+async fn auth_status(State(state): State<Arc<UiState>>) -> Response {
+    json_response(
+        StatusCode::OK,
+        json!({"accountExists": state.accounts.exists()}),
+    )
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SignupRequest {
+    username: String,
+    password: String,
+}
+
+/// Creates the console account; only while none exists.
+async fn signup(State(state): State<Arc<UiState>>, request: Request) -> Response {
+    let (client, signup) = match read_json::<SignupRequest>(request).await {
+        Ok(parsed) => parsed,
+        Err(response) => return response,
+    };
+    if blocked(&state, &client).await {
+        return too_many_attempts();
+    }
+    let _guard = state.signup.lock().await;
+    if state.accounts.exists() {
+        return json_error(
+            StatusCode::CONFLICT,
+            "an account already exists; sign in instead",
+        );
+    }
+    let account =
+        match hash_account(&state, signup.username.trim().to_owned(), signup.password).await {
+            Ok(account) => account,
+            Err(error) => return json_error(StatusCode::BAD_REQUEST, &format!("{error:#}")),
+        };
+    if let Err(error) = state.accounts.create(&account) {
+        return json_error(StatusCode::CONFLICT, &format!("{error:#}"));
+    }
+    warn!(%client, username = %account.username, "console account created");
+    signed_in(&state, &account).await
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct LoginRequest {
@@ -413,6 +472,12 @@ async fn login(State(state): State<Arc<UiState>>, request: Request) -> Response 
         Ok(parsed) => parsed,
         Err(response) => return response,
     };
+    if !state.accounts.exists() {
+        return json_error(
+            StatusCode::CONFLICT,
+            "no account exists yet; create one first",
+        );
+    }
     if blocked(&state, &client).await {
         return too_many_attempts();
     }
@@ -1004,11 +1069,19 @@ mod tests {
     }
 
     fn fixture(socket_path: PathBuf) -> Fixture {
-        let directory = tempfile::tempdir().unwrap();
-        let accounts = AccountStore::new(directory.path());
-        accounts
+        let fixture = empty_fixture(socket_path);
+        fixture
+            .state
+            .accounts
             .save(&account::new_account_with_cost("admin", PASSWORD, 4).unwrap())
             .unwrap();
+        fixture
+    }
+
+    /// A console on which no account has been created yet.
+    fn empty_fixture(socket_path: PathBuf) -> Fixture {
+        let directory = tempfile::tempdir().unwrap();
+        let accounts = AccountStore::new(directory.path());
         let state = Arc::new(UiState {
             socket_path,
             proton_socket_path: PathBuf::from("/nonexistent/proton.sock"),
@@ -1017,6 +1090,7 @@ mod tests {
             sessions: Mutex::new(HashMap::new()),
             failures: Mutex::new(HashMap::new()),
             recovery: Mutex::new(Recovery::default()),
+            signup: Mutex::new(()),
         });
         Fixture {
             router: router(state.clone()),
@@ -1116,6 +1190,105 @@ mod tests {
                 .status(),
             StatusCode::UNAUTHORIZED
         );
+    }
+
+    #[tokio::test]
+    async fn the_first_visitor_creates_the_only_account() {
+        let Fixture {
+            mut router,
+            _directory: _keep,
+            ..
+        } = empty_fixture(PathBuf::from("/nonexistent"));
+        let status = send(&mut router, Method::GET, "/auth/status", &[], None).await;
+        assert_eq!(json_body(status).await["accountExists"], false);
+        assert_eq!(
+            send(&mut router, Method::GET, "/signup", &[], None)
+                .await
+                .status(),
+            StatusCode::OK
+        );
+        let page = send(&mut router, Method::GET, "/", &[], None).await;
+        assert_eq!(page.headers()[header::LOCATION], "/login");
+        assert_eq!(
+            login(&mut router, "admin", PASSWORD).await.status(),
+            StatusCode::CONFLICT
+        );
+
+        let weak = send(
+            &mut router,
+            Method::POST,
+            "/auth/signup",
+            &[],
+            Some(json!({"username": "envin", "password": "short"})),
+        )
+        .await;
+        assert_eq!(weak.status(), StatusCode::BAD_REQUEST);
+        let created = send(
+            &mut router,
+            Method::POST,
+            "/auth/signup",
+            &[],
+            Some(json!({"username": "envin", "password": PASSWORD})),
+        )
+        .await;
+        assert_eq!(created.status(), StatusCode::OK);
+        let cookie = cookie_from(&created);
+        let session = send(
+            &mut router,
+            Method::GET,
+            "/session",
+            &[("cookie", &cookie)],
+            None,
+        )
+        .await;
+        assert_eq!(json_body(session).await["username"], "envin");
+
+        let second = send(
+            &mut router,
+            Method::POST,
+            "/auth/signup",
+            &[],
+            Some(json!({"username": "intruder", "password": NEW_PASSWORD})),
+        )
+        .await;
+        assert_eq!(second.status(), StatusCode::CONFLICT);
+        let status = send(&mut router, Method::GET, "/auth/status", &[], None).await;
+        assert_eq!(json_body(status).await["accountExists"], true);
+        assert_eq!(
+            login(&mut router, "envin", PASSWORD).await.status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            login(&mut router, "intruder", NEW_PASSWORD).await.status(),
+            StatusCode::UNAUTHORIZED
+        );
+    }
+
+    #[tokio::test]
+    async fn sign_up_is_closed_once_an_account_exists() {
+        let Fixture {
+            mut router,
+            _directory: _keep,
+            ..
+        } = fixture(PathBuf::from("/nonexistent"));
+        let attempt = send(
+            &mut router,
+            Method::POST,
+            "/auth/signup",
+            &[],
+            Some(json!({"username": "intruder", "password": NEW_PASSWORD})),
+        )
+        .await;
+        assert_eq!(attempt.status(), StatusCode::CONFLICT);
+        let cross = send(
+            &mut router,
+            Method::POST,
+            "/auth/signup",
+            &[("origin", "https://evil.example")],
+            Some(json!({"username": "x", "password": NEW_PASSWORD})),
+        )
+        .await;
+        assert_eq!(cross.status(), StatusCode::FORBIDDEN);
     }
 
     #[tokio::test]

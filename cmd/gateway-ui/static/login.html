@@ -10,6 +10,16 @@
   <main class="login-shell">
     <div class="brand login-brand"><span class="brand-mark">E</span><span>Exit Gateway</span></div>
     <section class="login-card">
+      <form id="signup-form" class="hidden">
+        <h1>Create the console account</h1>
+        <p>No account exists yet. The account you create here manages this gateway; afterwards sign-up closes.</p>
+        <label>Username<input id="signup-username" autocomplete="username" autocapitalize="none" spellcheck="false" required maxlength="64" value="admin"></label>
+        <label>Password<input id="signup-password" type="password" autocomplete="new-password" minlength="12" maxlength="72" required></label>
+        <label>Repeat password<input id="signup-confirm" type="password" autocomplete="new-password" minlength="12" maxlength="72" required></label>
+        <button>Create account</button>
+        <p class="login-note">Then set up password recovery by email on the Console account page.</p>
+      </form>
+
       <form id="login-form">
         <h1>Sign in</h1>
         <label>Username<input id="login-username" autocomplete="username" autocapitalize="none" spellcheck="false" required maxlength="64" autofocus></label>

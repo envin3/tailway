@@ -52,13 +52,9 @@ Do not put private keys in the catalog, Compose file, `.env`, this repository, o
 
 ## Configure console security
 
-Set the first console password (the username starts as `admin`):
+The console account is created on first visit: while no account exists, the sign-in page offers **Create the console account**. Sign-up closes once the account exists, so create it right after the first start; until then anyone who can reach the console could claim it. `scripts/create-ui-secrets.sh` still sets up an `admin` password in advance, for installs that should never show sign-up.
 
-```sh
-./scripts/create-ui-secrets.sh
-```
-
-Both can be changed later on the console's **Console account** page. The account lives in `ui-auth/`, which the console writes to, so the directory must be group-writable (`2770`, group `CONTROL_GID`).
+The username and password can be changed later on the console's **Console account** page. The account lives in `ui-auth/`, which the console writes to, so the directory must be group-writable (`2770`, group `CONTROL_GID`).
 
 Provide a certificate valid for the host's trusted LAN or tailnet name or address:
 
@@ -69,7 +65,7 @@ tls/tls.key
 
 Assign both TLS files to `CONTROL_GID` with mode `0640`. The UI child runs as UID `65532` with this group and does not rely on container root to bypass host file modes.
 
-The console refuses to start without TLS and an account. Publish port `8443` only on a trusted LAN or tailnet address and never forward it from the Internet.
+The console refuses to start without TLS. Publish port `8443` only on a trusted LAN or tailnet address and never forward it from the Internet.
 
 ## Build and enroll
 
