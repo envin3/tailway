@@ -3,7 +3,8 @@
 # The agent alerts on its own problems; this covers the agent being unable to:
 # the LXC stopped, a container unhealthy or gone, or tailnet DNS not answering.
 # A check alerts after FAILURES_BEFORE_ALERT consecutive failures and again when
-# it recovers. State lives in /run, so nothing is written to the boot disk.
+# it recovers, through the channels set on the console's Alerts page. State
+# lives in /run, so nothing is written to the boot disk.
 set -uo pipefail
 
 CONFIG=${TEPR_WATCHDOG_CONFIG:-/etc/default/tepr-watchdog}
@@ -15,8 +16,8 @@ CONTAINERS=${CONTAINERS:-"tailscale-exit-policy-router-agent tailscale-exit-poli
 GATEWAY_DNS=${GATEWAY_DNS:-}
 DNS_PROBE_NAME=${DNS_PROBE_NAME:-example.com}
 FAILURES_BEFORE_ALERT=${FAILURES_BEFORE_ALERT:-2}
-ALERT_WEBHOOK_URL=${ALERT_WEBHOOK_URL:-}
-ALERT_WEBHOOK_FORMAT=${ALERT_WEBHOOK_FORMAT:-ntfy}
+# The alert channels configured on the console's Alerts page.
+ALERT_SETTINGS=${ALERT_SETTINGS:-/mnt/main/appdata/tailscale-exit-policy-router/state/alerts.json}
 ALERT_SOURCE=${ALERT_SOURCE:-$(hostname)-watchdog}
 STATE_DIR=${STATE_DIR:-/run/tepr-watchdog}
 
@@ -25,18 +26,56 @@ mkdir -p "$STATE_DIR"
 notify() { # kind title message
     local kind=$1 title=$2 message=$3
     logger -t tepr-watchdog "$kind: $title: $message"
-    [[ -n $ALERT_WEBHOOK_URL ]] || return 0
-    if [[ $ALERT_WEBHOOK_FORMAT == json ]]; then
-        python3 -c 'import json,sys; print(json.dumps(dict(zip(["source","kind","title","message"], sys.argv[1:]))))' \
-            "$ALERT_SOURCE" "$kind" "$title" "$message" |
-            curl -fsS -m 10 --retry 3 -H 'Content-Type: application/json' --data-binary @- "$ALERT_WEBHOOK_URL" >/dev/null
-    else
-        local priority=default tags=white_check_mark
-        [[ $kind == problem ]] && priority=high tags=warning
-        printf '%s' "$message" |
-            curl -fsS -m 10 --retry 3 -H "Title: $ALERT_SOURCE: $title" -H "Priority: $priority" \
-                -H "Tags: $tags" --data-binary @- "$ALERT_WEBHOOK_URL" >/dev/null
-    fi || logger -t tepr-watchdog "alert delivery failed"
+    [[ -r $ALERT_SETTINGS ]] || return 0
+    python3 - "$ALERT_SETTINGS" "$ALERT_SOURCE" "$kind" "$title" "$message" <<'PY' || logger -t tepr-watchdog "alert delivery failed"
+import json
+import sys
+import urllib.request
+
+path, source, kind, title, message = sys.argv[1:]
+with open(path, encoding="utf-8") as file:
+    settings = json.load(file)
+failed = False
+
+
+def post(url, body, headers):
+    request = urllib.request.Request(url, data=body, headers=headers, method="POST")
+    with urllib.request.urlopen(request, timeout=10) as response:
+        response.read()
+
+
+telegram = settings.get("telegram")
+if telegram:
+    icon = {"problem": "\u26a0\ufe0f", "resolved": "\u2705"}.get(kind, "\u2139\ufe0f")
+    text = f"{icon} {title}\n{message}\n\n{source}"
+    try:
+        post(
+            f"https://api.telegram.org/bot{telegram['botToken']}/sendMessage",
+            json.dumps({"chat_id": telegram["chatId"], "text": text}).encode(),
+            {"Content-Type": "application/json"},
+        )
+    except Exception as error:  # the URL holds the bot token: report the type only
+        print(f"telegram: {type(error).__name__}", file=sys.stderr)
+        failed = True
+
+webhook = settings.get("webhook")
+if webhook:
+    try:
+        if webhook.get("format") == "json":
+            body = {"source": source, "key": title, "kind": kind, "title": title, "message": message}
+            post(webhook["url"], json.dumps(body).encode(), {"Content-Type": "application/json"})
+        else:
+            post(webhook["url"], message.encode(), {
+                "Title": f"{source}: {title}",
+                "Priority": "high" if kind == "problem" else "default",
+                "Tags": "warning" if kind == "problem" else "white_check_mark",
+            })
+    except Exception as error:
+        print(f"webhook: {type(error).__name__}", file=sys.stderr)
+        failed = True
+
+sys.exit(1 if failed else 0)
+PY
 }
 
 record() { # check-name problem-message-or-empty

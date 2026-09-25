@@ -161,7 +161,14 @@ If the gateway is down, Tailscale uses the second nameserver. Devices using this
 
 ## Alerts
 
-Set `ALERT_WEBHOOK_URL` in `.env` to receive notifications. The value is either an [ntfy](https://ntfy.sh) topic URL (the default `ALERT_WEBHOOK_FORMAT=ntfy` sends a plain-text body with `Title`, `Priority`, and `Tags` headers) or any webhook that accepts `ALERT_WEBHOOK_FORMAT=json` (`{source, key, kind, title, message}`). The agent sends a notification when a problem outlasts its grace period, and another when it clears:
+Configure notifications on the console's **Alerts** page. There are two channels, and either or both can be used:
+
+- **Telegram:** create a bot with @BotFather, paste its token, and send the bot a message (or add it to a group). **Detect chat** then finds the chat ID, and **Save and send test** confirms delivery.
+- **Webhook:** an [ntfy](https://ntfy.sh) topic URL (plain-text body with `Title`, `Priority`, and `Tags` headers) or any endpoint that accepts JSON (`{source, key, kind, title, message}`).
+
+The settings are stored in `state/alerts.json` (mode 0600). The bot token is never returned by the API or written to logs; the console shows only the bot ID and the last four characters. `ALERT_WEBHOOK_URL` in `.env` seeds a webhook only until settings are saved in the console.
+
+The agent sends a notification when a problem outlasts its grace period, and another when it clears:
 
 | Condition | Grace |
 | --- | --- |
@@ -171,14 +178,14 @@ Set `ALERT_WEBHOOK_URL` in `.env` to receive notifications. The value is either 
 | The Proton session is signed out, or the broker is unreachable | 10 min (polled every 5 min) |
 | Certificate renewal is not running, or the certificate expires within 24 h | none |
 
-The agent also sends an info message whenever it starts, so restarts are visible. Without a webhook, alerts are still logged. The console shows the notified ones in its banner and health indicator, and `GET /v1/status` lists all current conditions under `alerts`.
+The agent also sends an info message whenever it starts, so restarts are visible. Without a channel, alerts are still logged. The console shows the notified ones in its banner and health indicator, and `GET /v1/status` lists all current conditions under `alerts`.
 
-The agent cannot report its own absence. On a Proxmox host, `deploy/proxmox/` has a watchdog that runs every two minutes. It alerts, through the same webhook, when the gateway LXC is stopped, when either container is missing or unhealthy, or when the gateway's tailnet DNS stops answering. It alerts after two consecutive failures and again on recovery:
+The agent cannot report its own absence. On a Proxmox host, `deploy/proxmox/` has a watchdog that runs every two minutes. It alerts when the gateway LXC is stopped, when either container is missing or unhealthy, or when the gateway's tailnet DNS stops answering. It reads the same `state/alerts.json`, so it uses the channels configured on the console. It alerts after two consecutive failures and again on recovery:
 
 ```sh
 install -m 755 deploy/proxmox/tepr-watchdog.sh /usr/local/sbin/tepr-watchdog
 install -m 644 deploy/proxmox/tepr-watchdog.{service,timer} /etc/systemd/system/
-printf 'CTID=103\nGATEWAY_DNS=<gateway tailnet IP>\nALERT_WEBHOOK_URL=<url>\n' > /etc/default/tepr-watchdog
+printf 'CTID=103\nGATEWAY_DNS=<gateway tailnet IP>\nALERT_SETTINGS=<app directory>/state/alerts.json\n' > /etc/default/tepr-watchdog
 systemctl daemon-reload && systemctl enable --now tepr-watchdog.timer
 ```
 

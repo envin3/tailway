@@ -11,6 +11,7 @@ use tailscale_exit_policy_router::catalog::StaticCatalog;
 use tailscale_exit_policy_router::control::Api;
 use tailscale_exit_policy_router::dns::{self, DnsServer};
 use tailscale_exit_policy_router::domain::{ExitStatus, UnassignedPolicy};
+use tailscale_exit_policy_router::notify::{self, Notifier, SettingsStore};
 use tailscale_exit_policy_router::platform::Runner;
 use tailscale_exit_policy_router::proton::AccountLimits;
 use tailscale_exit_policy_router::reconcile::{Config, DnsConfig, Reconciler};
@@ -39,7 +40,7 @@ async fn main() -> Result<()> {
         ),
         environment("SECRETS_DIRECTORY", "/run/secrets/proton"),
     ));
-    let alerts = Arc::new(start_alerts()?);
+    let (alerts, notifier) = start_alerts()?;
     let devices = Arc::new(Provider::new(runner.clone()));
     let reconciler = Arc::new(Reconciler::new(
         Config {
@@ -136,7 +137,16 @@ async fn main() -> Result<()> {
         "/run/tailscale-exit-policy-router/proton.sock",
     )));
     let account_task = tokio::spawn(watch_account(account_limits.clone(), alerts.clone()));
-    let router = Api::new(store, catalog, devices, reconciler, account_limits, alerts).router();
+    let router = Api::new(
+        store,
+        catalog,
+        devices,
+        reconciler,
+        account_limits,
+        alerts,
+        notifier,
+    )
+    .router();
     let mut gateway_ui = start_gateway_ui()?;
     let server = async move {
         axum::serve(listener, router)
@@ -224,19 +234,26 @@ const ACCOUNT_POLL_INTERVAL: Duration = Duration::from_secs(300);
 /// close to expiry means renewal is failing.
 const CERTIFICATE_ALERT_SECONDS: i64 = 24 * 3600;
 
-fn start_alerts() -> Result<Alerts> {
-    let Some(url) = env::var("ALERT_WEBHOOK_URL")
-        .ok()
-        .filter(|url| !url.is_empty())
-    else {
-        info!("ALERT_WEBHOOK_URL not set; alerts are logged and shown in the status API only");
-        return Ok(Alerts::new(None));
-    };
-    let format: alert::Format = environment("ALERT_WEBHOOK_FORMAT", "ntfy").parse()?;
-    let source = environment("ALERT_SOURCE", "tailscale-exit-policy-router");
+fn start_alerts() -> Result<(Arc<Alerts>, Arc<Notifier>)> {
+    let settings = Arc::new(SettingsStore::open(
+        environment(
+            "ALERT_SETTINGS_PATH",
+            "/var/lib/tailscale-exit-policy-router/alerts.json",
+        ),
+        notify::seed_from_environment()?,
+    )?);
+    let notifier = Arc::new(Notifier::new(
+        settings,
+        environment("ALERT_SOURCE", "tailscale-exit-policy-router"),
+    )?);
     let (sender, queue) = mpsc::channel(alert::QUEUE_LENGTH);
-    tokio::spawn(alert::deliver(queue, url, format, source));
-    Ok(Alerts::new(Some(sender)))
+    tokio::spawn(notifier.clone().run(queue));
+    let channels = notify::channels(&notifier.settings().get());
+    info!(
+        ?channels,
+        "alert notifications ready; configure channels on the console's Alerts page"
+    );
+    Ok((Arc::new(Alerts::new(Some(sender))), notifier))
 }
 
 async fn observe_health(alerts: &Alerts, reconciler: &Reconciler, reconcile_failed: bool) {

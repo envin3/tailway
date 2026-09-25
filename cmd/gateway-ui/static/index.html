@@ -16,6 +16,7 @@
         <button class="nav-item" data-view="servers">Server selector</button>
         <button class="nav-item" data-view="exits">Active exits</button>
         <button class="nav-item" data-view="devices">Nodes</button>
+        <button class="nav-item" data-view="alerts">Alerts</button>
       </nav>
       <div class="adapter"><span>Catalog adapter</span><strong>Static import</strong></div>
     </aside>
@@ -58,6 +59,30 @@
             <button id="proton-logout" class="danger">Sign out</button>
           </div>
           <div id="proton-unavailable" class="hidden"><strong>Account broker unavailable</strong><p>Start the broker container to enable Proton login and live server discovery.</p></div>
+        </div>
+      </section>
+
+      <section id="alerts" class="view">
+        <div class="section-heading"><div><h2>Alerts</h2><p>Notifications when an exit fails, the Proton session or certificate renewal needs attention, or Tailscale stops. The Proxmox host watchdog uses the same channels.</p></div></div>
+        <div class="account-panel">
+          <form id="alert-form">
+            <fieldset class="alert-channel">
+              <legend><label class="toggle"><input type="checkbox" id="telegram-enabled"> Telegram</label></legend>
+              <ol class="hint"><li>Create a bot with @BotFather and paste its token.</li><li>Send the bot a message (or add it to a group), then choose Detect chat.</li></ol>
+              <label>Bot token<input id="telegram-token" type="password" autocomplete="off" spellcheck="false" maxlength="100"></label>
+              <label>Chat ID<span class="inline-field"><input id="telegram-chat" autocomplete="off" spellcheck="false" maxlength="32"><button type="button" id="telegram-detect" class="secondary">Detect chat</button></span></label>
+              <div id="telegram-chats" class="chat-list"></div>
+            </fieldset>
+            <fieldset class="alert-channel">
+              <legend><label class="toggle"><input type="checkbox" id="webhook-enabled"> Webhook</label></legend>
+              <label>URL<input id="webhook-url" type="url" autocomplete="off" spellcheck="false" maxlength="2048" placeholder="https://ntfy.sh/your-random-topic"></label>
+              <label>Format<select id="webhook-format"><option value="ntfy">ntfy</option><option value="json">JSON</option></select></label>
+            </fieldset>
+            <div class="form-actions"><button id="alert-save">Save</button><button type="button" id="alert-test" class="secondary">Save and send test</button></div>
+            <p id="alert-result" class="form-result" role="status"></p>
+          </form>
+          <h3 class="panel-subheading">Current conditions</h3>
+          <div id="alert-active" class="alert-active"></div>
         </div>
       </section>
 

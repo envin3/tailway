@@ -4,18 +4,19 @@ use std::sync::Arc;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, put};
+use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use rand::RngCore;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::alert::Alerts;
+use crate::alert::{Alerts, Notification};
 use crate::catalog::StaticCatalog;
 use crate::dns;
 use crate::domain::{
     Assignment, DesiredState, Exit, ExitStatus, NodeDns, SCHEMA_VERSION, Server, is_builtin_route,
 };
+use crate::notify::{self, Notifier, Settings, Telegram, Webhook};
 use crate::proton::AccountLimits;
 use crate::reconcile::Reconciler;
 use crate::state::{REVISION_CONFLICT, Store};
@@ -28,6 +29,34 @@ pub struct Api {
     reconciler: Arc<Reconciler>,
     account_limits: Arc<AccountLimits>,
     alerts: Arc<Alerts>,
+    notifier: Arc<Notifier>,
+}
+
+/// Replaces the alert channels. A channel that is absent or `null` is turned
+/// off; an omitted or empty bot token keeps the saved one.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AlertSettingsRequest {
+    #[serde(default)]
+    telegram: Option<TelegramRequest>,
+    #[serde(default)]
+    webhook: Option<Webhook>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct TelegramRequest {
+    #[serde(default)]
+    bot_token: String,
+    chat_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct TelegramChatsRequest {
+    /// Omitted or empty: use the saved token.
+    #[serde(default)]
+    bot_token: String,
 }
 
 #[derive(Deserialize)]
@@ -71,6 +100,7 @@ impl Api {
         reconciler: Arc<Reconciler>,
         account_limits: Arc<AccountLimits>,
         alerts: Arc<Alerts>,
+        notifier: Arc<Notifier>,
     ) -> Arc<Self> {
         Arc::new(Self {
             store,
@@ -79,6 +109,7 @@ impl Api {
             reconciler,
             account_limits,
             alerts,
+            notifier,
         })
     }
 
@@ -98,6 +129,9 @@ impl Api {
                 put(route_device).delete(disable_route),
             )
             .route("/v1/dns/{node_id}", put(set_dns).delete(reset_dns))
+            .route("/v1/alerts", get(get_alerts).put(put_alerts))
+            .route("/v1/alerts/test", post(test_alerts))
+            .route("/v1/alerts/telegram/chats", post(telegram_chats))
             .with_state(self)
             .layer(axum::extract::DefaultBodyLimit::max(1 << 20))
     }
@@ -659,6 +693,112 @@ async fn finish_mutation(
     }
 }
 
+fn alert_settings_view(settings: &Settings) -> Value {
+    json!({
+        "telegram": settings.telegram.as_ref().map(|telegram| json!({
+            "chatId": telegram.chat_id,
+            "botTokenHint": telegram.token_hint(),
+        })),
+        "webhook": settings.webhook,
+    })
+}
+
+async fn get_alerts(State(api): State<Arc<Api>>) -> Response {
+    let settings = api.notifier.settings().get();
+    json_response(
+        StatusCode::OK,
+        json!({
+            "settings": alert_settings_view(&settings),
+            "active": api.alerts.active(),
+        }),
+    )
+}
+
+fn merge_alert_settings(
+    current: &Settings,
+    request: AlertSettingsRequest,
+) -> anyhow::Result<Settings> {
+    let telegram = match request.telegram {
+        None => None,
+        Some(telegram) => {
+            let bot_token = if telegram.bot_token.trim().is_empty() {
+                current
+                    .telegram
+                    .as_ref()
+                    .map(|saved| saved.bot_token.clone())
+                    .ok_or_else(|| anyhow::anyhow!("enter the Telegram bot token"))?
+            } else {
+                telegram.bot_token.trim().to_owned()
+            };
+            Some(Telegram {
+                bot_token,
+                chat_id: telegram.chat_id.trim().to_owned(),
+            })
+        }
+    };
+    let settings = Settings {
+        telegram,
+        webhook: request.webhook.map(|webhook| Webhook {
+            url: webhook.url.trim().to_owned(),
+            format: webhook.format,
+        }),
+    };
+    settings.validate()?;
+    Ok(settings)
+}
+
+async fn put_alerts(
+    State(api): State<Arc<Api>>,
+    Json(request): Json<AlertSettingsRequest>,
+) -> Response {
+    let settings = match merge_alert_settings(&api.notifier.settings().get(), request) {
+        Ok(settings) => settings,
+        Err(error) => return error_response(StatusCode::BAD_REQUEST, error),
+    };
+    if let Err(error) = api.notifier.settings().replace(settings.clone()) {
+        return error_response(StatusCode::INTERNAL_SERVER_ERROR, error);
+    }
+    tracing::info!(channels = ?notify::channels(&settings), "alert channels updated");
+    json_response(
+        StatusCode::OK,
+        json!({"settings": alert_settings_view(&settings)}),
+    )
+}
+
+async fn test_alerts(State(api): State<Arc<Api>>) -> Response {
+    if api.notifier.settings().get().is_empty() {
+        return error_response(StatusCode::BAD_REQUEST, "no alert channel is configured");
+    }
+    let results = api
+        .notifier
+        .send(&Notification {
+            key: "test".into(),
+            title: "Test notification".into(),
+            message: "Alerts from the gateway will arrive here.".into(),
+            kind: "info",
+        })
+        .await;
+    json_response(StatusCode::OK, json!({"results": results}))
+}
+
+async fn telegram_chats(
+    State(api): State<Arc<Api>>,
+    Json(request): Json<TelegramChatsRequest>,
+) -> Response {
+    let token = if request.bot_token.trim().is_empty() {
+        match api.notifier.settings().get().telegram {
+            Some(telegram) => telegram.bot_token,
+            None => return error_response(StatusCode::BAD_REQUEST, "enter the Telegram bot token"),
+        }
+    } else {
+        request.bot_token.trim().to_owned()
+    };
+    match api.notifier.telegram_chats(&token).await {
+        Ok(chats) => json_response(StatusCode::OK, json!({"chats": chats})),
+        Err(error) => error_response(StatusCode::BAD_GATEWAY, format!("{error:#}")),
+    }
+}
+
 fn json_response(status: StatusCode, value: Value) -> Response {
     let mut response = (status, Json(value)).into_response();
     response.headers_mut().insert(
@@ -675,6 +815,56 @@ fn error_response(status: StatusCode, error: impl std::fmt::Display) -> Response
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const TOKEN: &str = "123456789:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw";
+
+    fn alert_request(value: Value) -> AlertSettingsRequest {
+        serde_json::from_value(value).unwrap()
+    }
+
+    #[test]
+    fn alert_settings_keep_the_saved_token_and_turn_off_omitted_channels() {
+        let saved = merge_alert_settings(
+            &Settings::default(),
+            alert_request(json!({"telegram": {"botToken": TOKEN, "chatId": "42"}, "webhook": {"url": "https://ntfy.sh/topic", "format": "ntfy"}})),
+        )
+        .unwrap();
+        let updated = merge_alert_settings(
+            &saved,
+            alert_request(json!({"telegram": {"chatId": "-100123"}})),
+        )
+        .unwrap();
+        assert_eq!(updated.telegram.as_ref().unwrap().bot_token, TOKEN);
+        assert_eq!(updated.telegram.as_ref().unwrap().chat_id, "-100123");
+        assert!(updated.webhook.is_none());
+        assert!(
+            merge_alert_settings(&saved, alert_request(json!({})))
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            merge_alert_settings(
+                &Settings::default(),
+                alert_request(json!({"telegram": {"chatId": "42"}}))
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("bot token")
+        );
+        assert!(serde_json::from_value::<AlertSettingsRequest>(json!({"email": {}})).is_err());
+    }
+
+    #[test]
+    fn alert_settings_view_never_contains_the_token() {
+        let settings = merge_alert_settings(
+            &Settings::default(),
+            alert_request(json!({"telegram": {"botToken": TOKEN, "chatId": "42"}})),
+        )
+        .unwrap();
+        let view = alert_settings_view(&settings).to_string();
+        assert!(!view.contains("AAHdq"));
+        assert!(view.contains("bot 123456789"));
+    }
     use crate::domain::{DIRECT_ROUTE_ID, LOCAL_ROUTE_ID};
 
     fn server(id: &str) -> Server {

@@ -97,6 +97,24 @@ input:focus, select:focus { outline: 3px solid #b7ddd7; border-color: var(--teal
 .account-panel dl { display: grid; grid-template-columns: repeat(2, 1fr); gap: 18px; margin: 0 0 24px; }
 .account-panel dl div { border-bottom: 1px solid var(--line); padding-bottom: 9px; }
 .account-panel dt { color: var(--muted); font-size: 11px; text-transform: uppercase; }
+.alert-channel { display: grid; gap: 14px; margin: 0; padding: 16px; border: 1px solid var(--line); border-radius: 5px; }
+.alert-channel legend { padding: 0 6px; }
+.account-panel .toggle { display: flex; align-items: center; gap: 8px; font-size: 14px; }
+.hint { margin: 0; padding-left: 20px; color: var(--muted); font-size: 13px; line-height: 1.5; }
+.inline-field { display: flex; gap: 8px; }
+.inline-field input { flex: 1; min-width: 0; }
+.account-panel form .inline-field button { justify-self: auto; white-space: nowrap; }
+.chat-list { display: flex; flex-wrap: wrap; gap: 8px; }
+.chat-list:empty { display: none; }
+.account-panel form .chat-list button { justify-self: auto; }
+.form-actions { display: flex; flex-wrap: wrap; gap: 10px; }
+.form-result { min-height: 1.4em; margin: 0; color: var(--muted); font-size: 13px; }
+.form-result.bad { color: var(--red); }
+.form-result.good { color: var(--teal-dark); }
+.panel-subheading { margin: 28px 0 10px; font-size: 15px; }
+.alert-active p { margin: 0 0 10px; padding-bottom: 10px; border-bottom: 1px solid var(--line); font-size: 13px; }
+.alert-active strong { display: block; margin-bottom: 3px; }
+.alert-active .muted { color: var(--muted); }
 .account-panel dd { margin: 5px 0 0; font-weight: 700; overflow-wrap: anywhere; }
 .exit-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
 .exit-card { padding: 20px; background: var(--surface); border: 1px solid var(--line); border-radius: 6px; }
@@ -161,6 +179,8 @@ dialog label { display: grid; gap: 7px; margin-top: 22px; font-size: 13px; font-
   .country-pagination button, .pagination button { flex: 1; min-width: 0; padding-inline: 8px; }
   .account-panel dl { grid-template-columns: 1fr; gap: 12px; }
   .account-panel form button, #proton-logout { width: 100%; min-height: 44px; }
+  .inline-field { flex-direction: column; }
+  .form-actions button { flex: 1; }
   .exit-card header { align-items: flex-start; flex-wrap: wrap; gap: 8px; }
   .exit-meta { grid-template-columns: 1fr; }
   .exit-meta strong { overflow-wrap: anywhere; }

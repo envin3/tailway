@@ -4,7 +4,7 @@ const LOCAL_ROUTE_ID = "__local__";
 const DIRECT_ROUTE_ID = "__direct__";
 const BUILTIN_ROUTES = new Set([LOCAL_ROUTE_ID, DIRECT_ROUTE_ID]);
 const POLICY_LABELS = { block: "Blocked", local: "Local only", direct: "Direct Internet" };
-const state = { revision: 0, csrfToken: "", status: null, servers: [], protonServers: [], protonAccount: null, protonAvailable: true, exits: [], devices: [], selectedServer: null, serverPage: 1, expandedCountry: "", countryServerPage: 1 };
+const state = { alerts: null, alertFormLoaded: false, revision: 0, csrfToken: "", status: null, servers: [], protonServers: [], protonAccount: null, protonAvailable: true, exits: [], devices: [], selectedServer: null, serverPage: 1, expandedCountry: "", countryServerPage: 1 };
 const regionNames = new Intl.DisplayNames(["en"], { type: "region" });
 
 const api = async (path, options = {}) => {
@@ -24,9 +24,10 @@ const api = async (path, options = {}) => {
 const load = async () => {
   try {
     if (!state.csrfToken) state.csrfToken = (await api("/session")).csrfToken;
-    const [status, catalog, exits, devices] = await Promise.all([
-      api("/v1/status"), api("/v1/catalog"), api("/v1/exits"), api("/v1/devices")
+    const [status, catalog, exits, devices, alerts] = await Promise.all([
+      api("/v1/status"), api("/v1/catalog"), api("/v1/exits"), api("/v1/devices"), api("/v1/alerts")
     ]);
+    state.alerts = alerts;
     state.status = status;
     state.servers = catalog.servers || [];
     state.exits = exits.exits || [];
@@ -47,6 +48,7 @@ const load = async () => {
       state.protonServers = [];
     }
     render();
+    renderAlerts();
     showAlert([status.lastError, ...activeProblems(status)].filter(Boolean).join(" · "));
   } catch (error) {
     showAlert(error.message);
@@ -257,6 +259,41 @@ document.querySelector("#server-page-prev").addEventListener("click", () => { st
 document.querySelector("#server-page-next").addEventListener("click", () => { state.serverPage += 1; state.expandedCountry = ""; renderServers(); });
 document.querySelector("#node-search").addEventListener("input", renderDevices);
 document.querySelector("#refresh").addEventListener("click", load);
+document.querySelector("#alert-form").addEventListener("change", event => {
+  if (event.target.matches("#telegram-enabled, #webhook-enabled")) syncAlertChannels();
+});
+document.querySelector("#alert-form").addEventListener("submit", async event => {
+  event.preventDefault();
+  setAlertResult("Saving…");
+  try { await saveAlerts(); setAlertResult("Saved.", "good"); } catch (error) { setAlertResult(error.message, "bad"); }
+});
+document.querySelector("#alert-test").addEventListener("click", async () => {
+  setAlertResult("Saving and sending…");
+  try {
+    await saveAlerts();
+    const { results } = await api("/v1/alerts/test", { method: "POST", body: "{}" });
+    const failed = results.filter(result => !result.ok);
+    setAlertResult(results.map(result => `${result.channel}: ${result.ok ? "sent" : result.error}`).join(" · "), failed.length ? "bad" : "good");
+  } catch (error) { setAlertResult(error.message, "bad"); }
+});
+document.querySelector("#telegram-detect").addEventListener("click", async () => {
+  const list = document.querySelector("#telegram-chats");
+  list.replaceChildren();
+  setAlertResult("Looking for chats that messaged the bot…");
+  try {
+    const { chats } = await api("/v1/alerts/telegram/chats", { method: "POST", body: JSON.stringify({ botToken: document.querySelector("#telegram-token").value.trim() }) });
+    if (!chats.length) return setAlertResult("No messages yet. Send the bot a message in Telegram, then try again.", "bad");
+    list.innerHTML = chats.map(chat => `<button type="button" class="secondary" data-chat-id="${escapeHTML(chat.id)}">${escapeHTML(chat.name || chat.id)} · ${escapeHTML(chat.kind)}</button>`).join("");
+    setAlertResult(chats.length === 1 ? "Found one chat; select it." : `Found ${chats.length} chats; select one.`);
+  } catch (error) { setAlertResult(error.message, "bad"); }
+});
+document.querySelector("#telegram-chats").addEventListener("click", event => {
+  const chat = event.target.closest("[data-chat-id]");
+  if (!chat) return;
+  document.querySelector("#telegram-chat").value = chat.dataset.chatId;
+  document.querySelector("#telegram-chats").replaceChildren();
+  setAlertResult("Chat selected. Save, or save and send a test.");
+});
 document.querySelector("#proton-login-form").addEventListener("submit", async event => {
   event.preventDefault();
   const password = document.querySelector("#proton-password");
@@ -304,6 +341,55 @@ const addProtonServer = async button => {
     button.disabled = false;
     showAlert(error.message);
   }
+};
+
+// The form is filled once (and after saving) so a refresh never overwrites what is being typed.
+const fillAlertForm = settings => {
+  const telegram = settings.telegram;
+  document.querySelector("#telegram-enabled").checked = Boolean(telegram);
+  document.querySelector("#telegram-token").value = "";
+  document.querySelector("#telegram-token").placeholder = telegram ? `Saved: ${telegram.botTokenHint}. Leave empty to keep it.` : "123456789:AA…";
+  document.querySelector("#telegram-chat").value = telegram?.chatId || "";
+  document.querySelector("#webhook-enabled").checked = Boolean(settings.webhook);
+  document.querySelector("#webhook-url").value = settings.webhook?.url || "";
+  document.querySelector("#webhook-format").value = settings.webhook?.format || "ntfy";
+  document.querySelector("#telegram-chats").replaceChildren();
+  syncAlertChannels();
+  state.alertFormLoaded = true;
+};
+
+const syncAlertChannels = () => {
+  for (const channel of ["telegram", "webhook"]) {
+    const enabled = document.querySelector(`#${channel}-enabled`).checked;
+    document.querySelectorAll(`#alert-form [id^="${channel}-"]:not(#${channel}-enabled)`).forEach(element => { element.disabled = !enabled; });
+  }
+};
+
+const renderAlerts = () => {
+  if (!state.alerts) return;
+  if (!state.alertFormLoaded) fillAlertForm(state.alerts.settings);
+  const active = state.alerts.active || [];
+  document.querySelector("#alert-active").innerHTML = active.length
+    ? active.map(alert => `<p><strong>${escapeHTML(alert.key)}</strong>${escapeHTML(alert.message)}<br><span class="muted">Since ${escapeHTML(new Date(alert.since * 1000).toLocaleString())}${alert.notified ? " · notified" : " · waiting for the grace period"}</span></p>`).join("")
+    : `<p class="muted">No problems right now.</p>`;
+};
+
+const setAlertResult = (message, kind = "") => {
+  const result = document.querySelector("#alert-result");
+  result.textContent = message;
+  result.className = `form-result ${kind}`;
+};
+
+const saveAlerts = async () => {
+  const telegram = document.querySelector("#telegram-enabled").checked
+    ? { botToken: document.querySelector("#telegram-token").value.trim(), chatId: document.querySelector("#telegram-chat").value.trim() }
+    : null;
+  const webhook = document.querySelector("#webhook-enabled").checked
+    ? { url: document.querySelector("#webhook-url").value.trim(), format: document.querySelector("#webhook-format").value }
+    : null;
+  const saved = await api("/v1/alerts", { method: "PUT", body: JSON.stringify({ telegram, webhook }) });
+  state.alerts = { ...state.alerts, settings: saved.settings };
+  fillAlertForm(saved.settings);
 };
 
 const showAlert = message => {

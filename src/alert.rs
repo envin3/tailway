@@ -1,38 +1,16 @@
 //! Operator alerts. Conditions are observed repeatedly (every reconcile, every
 //! account poll); a notification is sent when a condition has persisted for its
-//! grace period, and again when it clears. Delivery is a webhook: ntfy-style
-//! (plain text body with Title/Priority/Tags headers) or a JSON document.
+//! grace period, and again when it clears. Delivery is in `notify`.
 
 use std::collections::BTreeMap;
 use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use anyhow::{Context, Result, bail};
 use serde::Serialize;
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 
-const DELIVERY_ATTEMPTS: u32 = 4;
-const DELIVERY_TIMEOUT: Duration = Duration::from_secs(10);
 pub const QUEUE_LENGTH: usize = 64;
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum Format {
-    Ntfy,
-    Json,
-}
-
-impl std::str::FromStr for Format {
-    type Err = anyhow::Error;
-
-    fn from_str(value: &str) -> Result<Self> {
-        match value {
-            "ntfy" => Ok(Self::Ntfy),
-            "json" => Ok(Self::Json),
-            other => bail!("unknown alert format {other:?}; use ntfy or json"),
-        }
-    }
-}
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct Notification {
@@ -207,85 +185,6 @@ fn unix_now() -> u64 {
         .as_secs()
 }
 
-/// Deliver queued notifications in order, retrying transient failures.
-pub async fn deliver(
-    mut queue: mpsc::Receiver<Notification>,
-    url: String,
-    format: Format,
-    source: String,
-) {
-    let client = match client() {
-        Ok(client) => client,
-        Err(error) => {
-            warn!(%error, "cannot build alert HTTP client; alerts are logged only");
-            return;
-        }
-    };
-    while let Some(notification) = queue.recv().await {
-        for attempt in 1..=DELIVERY_ATTEMPTS {
-            match post(&client, &url, format, &source, &notification).await {
-                Ok(()) => break,
-                Err(error) if attempt == DELIVERY_ATTEMPTS => {
-                    warn!(%error, key = %notification.key, "alert delivery failed; giving up");
-                }
-                Err(error) => {
-                    warn!(%error, attempt, "alert delivery failed; retrying");
-                    tokio::time::sleep(Duration::from_secs(5 << attempt)).await;
-                }
-            }
-        }
-    }
-}
-
-fn client() -> reqwest::Result<reqwest::Client> {
-    // A no-op when a provider is already installed.
-    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
-    reqwest::Client::builder().timeout(DELIVERY_TIMEOUT).build()
-}
-
-async fn post(
-    client: &reqwest::Client,
-    url: &str,
-    format: Format,
-    source: &str,
-    notification: &Notification,
-) -> Result<()> {
-    let request = match format {
-        Format::Ntfy => client
-            .post(url)
-            .header("Title", format!("{source}: {}", notification.title))
-            .header(
-                "Priority",
-                if notification.kind == "problem" {
-                    "high"
-                } else {
-                    "default"
-                },
-            )
-            .header(
-                "Tags",
-                match notification.kind {
-                    "problem" => "warning",
-                    "resolved" => "white_check_mark",
-                    _ => "information_source",
-                },
-            )
-            .body(notification.message.clone()),
-        Format::Json => client.post(url).json(&serde_json::json!({
-            "source": source,
-            "key": notification.key,
-            "kind": notification.kind,
-            "title": notification.title,
-            "message": notification.message,
-        })),
-    };
-    let response = request.send().await.context("send alert")?;
-    if !response.status().is_success() {
-        bail!("alert webhook returned {}", response.status());
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -396,17 +295,5 @@ mod tests {
                 ("exit:b".into(), "resolved"),
             ]
         );
-    }
-
-    #[test]
-    fn builds_the_https_client() {
-        client().unwrap();
-    }
-
-    #[test]
-    fn parses_formats() {
-        assert_eq!("ntfy".parse::<Format>().unwrap(), Format::Ntfy);
-        assert_eq!("json".parse::<Format>().unwrap(), Format::Json);
-        assert!("slack".parse::<Format>().is_err());
     }
 }
