@@ -44,6 +44,16 @@ const ICONS: &[(&str, &[u8], &str)] = &[
         "image/svg+xml",
     ),
     (
+        "favicon.ico",
+        include_bytes!("../../cmd/gateway-ui/static/icons/favicon.ico"),
+        "image/x-icon",
+    ),
+    (
+        "favicon-32.png",
+        include_bytes!("../../cmd/gateway-ui/static/icons/favicon-32.png"),
+        "image/png",
+    ),
+    (
         "app-icon.svg",
         include_bytes!("../../cmd/gateway-ui/static/icons/app-icon.svg"),
         "image/svg+xml",
@@ -210,6 +220,11 @@ fn router(state: Arc<UiState>) -> Router {
         .route("/login.js", get(login_js))
         .route("/styles.css", get(styles_css))
         .route("/icons/{name}", get(icon))
+        // Where browsers look when a page names no icon, or cannot use SVG.
+        .route(
+            "/favicon.ico",
+            get(|| icon(axum::extract::Path("favicon.ico".to_owned()))),
+        )
         .route("/auth/login", post(login))
         .route("/auth/recovery/request", post(request_recovery))
         .route("/auth/recovery/reset", post(reset_with_code))
@@ -1347,6 +1362,8 @@ mod tests {
         } = fixture(PathBuf::from("/nonexistent"));
         for (path, content_type) in [
             ("/icons/favicon.svg", "image/svg+xml"),
+            ("/favicon.ico", "image/x-icon"),
+            ("/icons/favicon-32.png", "image/png"),
             ("/icons/apple-touch-icon.png", "image/png"),
             ("/icons/manifest.webmanifest", "application/manifest+json"),
         ] {
