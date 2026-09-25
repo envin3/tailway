@@ -36,6 +36,39 @@ const APP_JS: &str = include_str!("../../cmd/gateway-ui/static/app.js");
 const LOGIN_HTML: &str = include_str!("../../cmd/gateway-ui/static/login.html");
 const LOGIN_JS: &str = include_str!("../../cmd/gateway-ui/static/login.js");
 const STYLES_CSS: &str = include_str!("../../cmd/gateway-ui/static/styles.css");
+/// Tab, home-screen and install icons. Public: the sign-in page uses them too.
+const ICONS: &[(&str, &[u8], &str)] = &[
+    (
+        "favicon.svg",
+        include_bytes!("../../cmd/gateway-ui/static/icons/favicon.svg"),
+        "image/svg+xml",
+    ),
+    (
+        "app-icon.svg",
+        include_bytes!("../../cmd/gateway-ui/static/icons/app-icon.svg"),
+        "image/svg+xml",
+    ),
+    (
+        "apple-touch-icon.png",
+        include_bytes!("../../cmd/gateway-ui/static/icons/apple-touch-icon.png"),
+        "image/png",
+    ),
+    (
+        "icon-192.png",
+        include_bytes!("../../cmd/gateway-ui/static/icons/icon-192.png"),
+        "image/png",
+    ),
+    (
+        "icon-512.png",
+        include_bytes!("../../cmd/gateway-ui/static/icons/icon-512.png"),
+        "image/png",
+    ),
+    (
+        "manifest.webmanifest",
+        include_bytes!("../../cmd/gateway-ui/static/icons/manifest.webmanifest"),
+        "application/manifest+json",
+    ),
+];
 
 const SESSION_COOKIE: &str = "tailway_session";
 const SESSION_IDLE_TIMEOUT: Duration = Duration::from_secs(30 * 60);
@@ -176,6 +209,7 @@ fn router(state: Arc<UiState>) -> Router {
         .route("/auth/signup", post(signup))
         .route("/login.js", get(login_js))
         .route("/styles.css", get(styles_css))
+        .route("/icons/{name}", get(icon))
         .route("/auth/login", post(login))
         .route("/auth/recovery/request", post(request_recovery))
         .route("/auth/recovery/reset", post(reset_with_code))
@@ -210,6 +244,22 @@ async fn app_js() -> Response {
 
 async fn login_js() -> Response {
     with_content_type(LOGIN_JS, "text/javascript; charset=utf-8")
+}
+
+async fn icon(axum::extract::Path(name): axum::extract::Path<String>) -> Response {
+    match ICONS.iter().find(|(file, _, _)| *file == name) {
+        Some((_, bytes, content_type)) => {
+            let mut response = Body::from(*bytes).into_response();
+            let headers = response.headers_mut();
+            headers.insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
+            headers.insert(
+                header::CACHE_CONTROL,
+                HeaderValue::from_static("public, max-age=86400"),
+            );
+            response
+        }
+        None => json_error(StatusCode::NOT_FOUND, "not found"),
+    }
 }
 
 async fn styles_css() -> Response {
@@ -1286,6 +1336,38 @@ mod tests {
         )
         .await;
         assert_eq!(cross.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn icons_are_public_and_cacheable() {
+        let Fixture {
+            mut router,
+            _directory: _keep,
+            ..
+        } = fixture(PathBuf::from("/nonexistent"));
+        for (path, content_type) in [
+            ("/icons/favicon.svg", "image/svg+xml"),
+            ("/icons/apple-touch-icon.png", "image/png"),
+            ("/icons/manifest.webmanifest", "application/manifest+json"),
+        ] {
+            let response = send(&mut router, Method::GET, path, &[], None).await;
+            assert_eq!(response.status(), StatusCode::OK, "{path}");
+            assert_eq!(response.headers()[header::CONTENT_TYPE], content_type);
+            assert!(
+                response.headers()[header::CACHE_CONTROL]
+                    .to_str()
+                    .unwrap()
+                    .contains("max-age")
+            );
+        }
+        let missing = send(&mut router, Method::GET, "/icons/../app.js", &[], None).await;
+        assert_ne!(missing.status(), StatusCode::OK);
+        assert_eq!(
+            send(&mut router, Method::GET, "/icons/nope.png", &[], None)
+                .await
+                .status(),
+            StatusCode::NOT_FOUND
+        );
     }
 
     #[tokio::test]

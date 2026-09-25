@@ -161,8 +161,9 @@ input[type="checkbox"] { width: auto; min-height: 0; accent-color: var(--primary
 .app { display: grid; grid-template-columns: 248px minmax(0, 1fr); min-height: 100vh; }
 .sidebar { position: sticky; top: 0; height: 100vh; display: flex; flex-direction: column; gap: 24px; padding: 22px 14px; background: var(--sidebar); color: var(--sidebar-text); }
 .brand { display: flex; align-items: center; gap: 10px; padding: 0 8px; color: #fff; font-size: 17px; font-weight: 700; letter-spacing: -.01em; }
-.brand-mark { display: grid; place-items: center; width: 34px; height: 34px; border-radius: 9px; background: linear-gradient(135deg, #1fb59e, #0d7a6c); color: #fff; }
-.brand-mark svg { width: 20px; height: 20px; }
+/* The Tailway mark: a shield around the chosen route. Brand teal in both themes. */
+.brand-mark { display: grid; place-items: center; width: 34px; height: 34px; border-radius: 8px; background: #0d7a6c; }
+.brand-mark svg { width: 23px; height: 23px; fill: none; }
 .nav { display: grid; gap: 4px; }
 .nav a { display: flex; align-items: center; gap: 12px; padding: 10px 12px; border-radius: var(--radius-sm); color: var(--sidebar-text); font-weight: 600; text-decoration: none; }
 .nav a:hover { background: var(--sidebar-active); color: #fff; }
