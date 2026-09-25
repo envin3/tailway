@@ -37,8 +37,8 @@ document.querySelector("#send-code").addEventListener("click", async event => {
   event.target.disabled = true;
   message("Sending…");
   try {
-    await post("/auth/recovery/request", {});
-    message("Code sent to Telegram.", "good");
+    const { to } = await post("/auth/recovery/request", {});
+    message(`Code emailed to ${to}.`, "good");
     document.querySelector("#recovery-code").focus();
   } catch (error) {
     message(error.message, "bad");

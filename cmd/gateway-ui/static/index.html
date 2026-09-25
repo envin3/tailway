@@ -98,9 +98,24 @@
             <button>Save</button>
             <p id="account-result" class="form-result" role="status"></p>
           </form>
-          <h3 class="panel-subheading">Password recovery</h3>
-          <p id="account-recovery" class="account-note"></p>
           <p id="account-changed" class="account-note"></p>
+          <h3 class="panel-subheading">Password recovery by email</h3>
+          <p id="account-recovery" class="account-note"></p>
+          <form id="mail-form">
+            <label class="toggle"><input type="checkbox" id="mail-enabled"> Email reset codes</label>
+            <label>Recovery email<input id="mail-email" type="email" autocomplete="email" spellcheck="false" maxlength="254"></label>
+            <div class="field-row">
+              <label>SMTP server<input id="smtp-host" autocomplete="off" spellcheck="false" maxlength="253" placeholder="smtp.gmail.com"></label>
+              <label>Port<input id="smtp-port" type="number" min="1" max="65535" value="587"></label>
+            </div>
+            <label>Security<select id="smtp-security"><option value="starttls">STARTTLS (usually port 587)</option><option value="tls">TLS (usually port 465)</option><option value="none">None (local relay only)</option></select></label>
+            <label>SMTP username<input id="smtp-username" autocomplete="off" spellcheck="false" maxlength="254"></label>
+            <label>SMTP password<input id="smtp-password" type="password" autocomplete="new-password" maxlength="256"></label>
+            <label>From<input id="smtp-from" autocomplete="off" spellcheck="false" maxlength="320" placeholder="Exit Gateway &lt;you@example.com&gt;"></label>
+            <label>Current console password<input id="mail-current-password" type="password" autocomplete="current-password" required maxlength="128"></label>
+            <div class="form-actions"><button>Save</button><button type="button" id="mail-test" class="secondary">Save and send test email</button></div>
+            <p id="mail-result" class="form-result" role="status"></p>
+          </form>
         </div>
       </section>
 

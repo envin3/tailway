@@ -4,7 +4,7 @@ const LOCAL_ROUTE_ID = "__local__";
 const DIRECT_ROUTE_ID = "__direct__";
 const BUILTIN_ROUTES = new Set([LOCAL_ROUTE_ID, DIRECT_ROUTE_ID]);
 const POLICY_LABELS = { block: "Blocked", local: "Local only", direct: "Direct Internet" };
-const state = { username: "", consoleAccount: null, accountFormLoaded: false, alerts: null, alertFormLoaded: false, revision: 0, csrfToken: "", status: null, servers: [], protonServers: [], protonAccount: null, protonAvailable: true, exits: [], devices: [], selectedServer: null, serverPage: 1, expandedCountry: "", countryServerPage: 1 };
+const state = { username: "", consoleAccount: null, accountFormLoaded: false, mailFormLoaded: false, alerts: null, alertFormLoaded: false, revision: 0, csrfToken: "", status: null, servers: [], protonServers: [], protonAccount: null, protonAvailable: true, exits: [], devices: [], selectedServer: null, serverPage: 1, expandedCountry: "", countryServerPage: 1 };
 const regionNames = new Intl.DisplayNames(["en"], { type: "region" });
 
 const api = async (path, options = {}) => {
@@ -297,6 +297,27 @@ document.querySelector("#console-account-form").addEventListener("submit", async
     for (const input of [newPassword, confirmation, current]) input.value = "";
   }
 });
+document.querySelector("#mail-form").addEventListener("change", event => {
+  if (event.target.id === "mail-enabled") syncMailFields();
+  if (event.target.id === "smtp-security") {
+    const port = document.querySelector("#smtp-port");
+    if (Object.values(SMTP_PORTS).includes(Number(port.value))) port.value = SMTP_PORTS[event.target.value];
+  }
+});
+document.querySelector("#mail-form").addEventListener("submit", async event => {
+  event.preventDefault();
+  setMailResult("Saving…");
+  try { await saveMail(); setMailResult("Saved.", "good"); } catch (error) { setMailResult(error.message, "bad"); }
+});
+document.querySelector("#mail-test").addEventListener("click", async () => {
+  if (!document.querySelector("#mail-form").reportValidity()) return;
+  setMailResult("Saving and sending…");
+  try {
+    await saveMail();
+    const { to } = await api("/auth/recovery/test", { method: "POST", body: "{}" });
+    setMailResult(`Test email sent to ${to}. Check the inbox (and spam folder).`, "good");
+  } catch (error) { setMailResult(error.message, "bad"); }
+});
 document.querySelector("#alert-form").addEventListener("change", event => {
   if (event.target.matches("#telegram-enabled, #webhook-enabled")) syncAlertChannels();
 });
@@ -421,12 +442,69 @@ const renderConsoleAccount = () => {
     document.querySelector("#account-username").value = account.username;
     state.accountFormLoaded = true;
   }
-  document.querySelector("#account-recovery").textContent = account.recovery?.telegram
-    ? "Forgot your password? The sign-in page can send a one-time code to the Telegram chat set up on the Alerts page."
-    : "Set up Telegram on the Alerts page to reset a forgotten password from the sign-in page. Without it, reset the password on the server with scripts/reset-console-password.sh.";
+  document.querySelector("#account-recovery").textContent = account.recovery
+    ? `A forgotten password can be reset from the sign-in page with a code emailed to ${account.recovery.email}.`
+    : "Set up email to reset a forgotten password from the sign-in page. Without it, the password can only be reset on the server with scripts/reset-console-password.sh. With Gmail or iCloud, use an app password.";
+  if (!state.mailFormLoaded) fillMailForm(account.recovery);
   document.querySelector("#account-changed").textContent = account.passwordChangedAt
     ? `Password last changed ${new Date(account.passwordChangedAt * 1000).toLocaleString()}.`
     : "";
+};
+
+const SMTP_PORTS = { starttls: 587, tls: 465, none: 25 };
+
+// Filled once (and after saving) so a refresh never overwrites what is being typed.
+const fillMailForm = recovery => {
+  const smtp = recovery?.smtp;
+  document.querySelector("#mail-enabled").checked = Boolean(recovery);
+  document.querySelector("#mail-email").value = recovery?.email || "";
+  document.querySelector("#smtp-host").value = smtp?.host || "";
+  document.querySelector("#smtp-port").value = smtp?.port || 587;
+  document.querySelector("#smtp-security").value = smtp?.security || "starttls";
+  document.querySelector("#smtp-username").value = smtp?.username || "";
+  document.querySelector("#smtp-password").value = "";
+  document.querySelector("#smtp-password").placeholder = smtp?.passwordSet ? "Saved. Leave empty to keep it." : "";
+  document.querySelector("#smtp-from").value = smtp?.from || "";
+  syncMailFields();
+  state.mailFormLoaded = true;
+};
+
+const syncMailFields = () => {
+  const enabled = document.querySelector("#mail-enabled").checked;
+  document.querySelectorAll("#mail-form input, #mail-form select, #mail-test").forEach(element => {
+    if (!["mail-enabled", "mail-current-password"].includes(element.id)) element.disabled = !enabled;
+  });
+};
+
+const setMailResult = (text, kind = "") => {
+  const result = document.querySelector("#mail-result");
+  result.textContent = text;
+  result.className = `form-result ${kind}`;
+};
+
+const saveMail = async () => {
+  const value = id => document.querySelector(id).value.trim();
+  const username = value("#smtp-username");
+  const recovery = document.querySelector("#mail-enabled").checked ? {
+    email: value("#mail-email"),
+    smtp: {
+      host: value("#smtp-host"),
+      port: Number(value("#smtp-port")),
+      security: value("#smtp-security"),
+      username,
+      password: document.querySelector("#smtp-password").value,
+      from: value("#smtp-from") || value("#mail-email")
+    }
+  } : null;
+  const current = document.querySelector("#mail-current-password");
+  try {
+    const saved = await api("/auth/account", { method: "PUT", body: JSON.stringify({ currentPassword: current.value, recovery }) });
+    state.consoleAccount = { ...state.consoleAccount, recovery: saved.recovery };
+    fillMailForm(saved.recovery);
+    renderConsoleAccount();
+  } finally {
+    current.value = "";
+  }
 };
 
 const setAlertResult = (message, kind = "") => {

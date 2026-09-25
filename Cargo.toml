@@ -14,6 +14,7 @@ bytes = "1.10"
 hex = "0.4"
 http-body-util = "0.1"
 humantime = "2.3"
+lettre = { version = "0.11", default-features = false, features = ["aws-lc-rs", "builder", "hostname", "smtp-transport", "tokio1-rustls", "webpki-roots"] }
 hyper = { version = "1.6", features = ["client", "http1"] }
 hyper-util = { version = "0.1", features = ["client-legacy", "http1", "tokio"] }
 rand = "0.9"

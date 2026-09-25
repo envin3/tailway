@@ -52,12 +52,6 @@ struct TelegramRequest {
 }
 
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RecoveryCodeRequest {
-    code: String,
-}
-
-#[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct TelegramChatsRequest {
     /// Omitted or empty: use the saved token.
@@ -138,8 +132,6 @@ impl Api {
             .route("/v1/alerts", get(get_alerts).put(put_alerts))
             .route("/v1/alerts/test", post(test_alerts))
             .route("/v1/alerts/telegram/chats", post(telegram_chats))
-            // Called by the console process itself; its proxy refuses /v1/internal/.
-            .route("/v1/internal/recovery-code", post(send_recovery_code))
             .with_state(self)
             .layer(axum::extract::DefaultBodyLimit::max(1 << 20))
     }
@@ -787,23 +779,6 @@ async fn test_alerts(State(api): State<Arc<Api>>) -> Response {
         })
         .await;
     json_response(StatusCode::OK, json!({"results": results}))
-}
-
-async fn send_recovery_code(
-    State(api): State<Arc<Api>>,
-    Json(request): Json<RecoveryCodeRequest>,
-) -> Response {
-    // Only a bare code: callers cannot choose what the bot says.
-    if request.code.len() != 8 || !request.code.bytes().all(|byte| byte.is_ascii_digit()) {
-        return error_response(StatusCode::BAD_REQUEST, "invalid recovery code");
-    }
-    if api.notifier.settings().get().telegram.is_none() {
-        return error_response(StatusCode::CONFLICT, "Telegram is not configured");
-    }
-    match api.notifier.send_recovery_code(&request.code).await {
-        Ok(()) => json_response(StatusCode::OK, json!({"sent": true})),
-        Err(error) => error_response(StatusCode::BAD_GATEWAY, format!("{error:#}")),
-    }
 }
 
 async fn telegram_chats(

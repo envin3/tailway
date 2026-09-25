@@ -26,6 +26,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 use tailscale_exit_policy_router::account::{self, Account, AccountStore};
+use tailscale_exit_policy_router::mail::{EmailRecovery, Security, Smtp};
 use tokio::net::UnixStream;
 use tokio::sync::Mutex;
 use tracing::{info, warn};
@@ -131,7 +132,7 @@ fn account_directory() -> PathBuf {
 }
 
 /// `gateway-ui reset-password [--username NAME]`, new password on stdin. The
-/// last resort when the password is lost and Telegram recovery is unavailable.
+/// last resort when the password is lost and email recovery is unavailable.
 fn reset_password(arguments: &[String]) -> Result<()> {
     let username = match arguments {
         [] => None,
@@ -139,8 +140,9 @@ fn reset_password(arguments: &[String]) -> Result<()> {
         _ => bail!("usage: gateway-ui reset-password [--username NAME] < password"),
     };
     let store = AccountStore::new(account_directory());
+    let current = store.load().ok();
     let username = username
-        .or_else(|| store.load().ok().map(|account| account.username))
+        .or_else(|| current.as_ref().map(|account| account.username.clone()))
         .unwrap_or_else(|| account::DEFAULT_USERNAME.into());
     let mut password = String::new();
     std::io::stdin()
@@ -148,7 +150,9 @@ fn reset_password(arguments: &[String]) -> Result<()> {
         .read_line(&mut password)
         .context("read the new password from stdin")?;
     let password = password.trim_end_matches(['\n', '\r']);
-    store.save(&account::new_account(&username, password)?)?;
+    let mut account = account::new_account(&username, password)?;
+    account.recovery = current.and_then(|account| account.recovery);
+    store.save(&account)?;
     eprintln!("Console password for {username} reset; existing sessions have ended.");
     Ok(())
 }
@@ -169,6 +173,7 @@ fn router(state: Arc<UiState>) -> Router {
         .route("/app.js", get(app_js))
         .route("/session", get(session))
         .route("/auth/account", get(get_account).put(update_account))
+        .route("/auth/recovery/test", post(test_recovery_email))
         .route("/auth/logout", post(logout))
         .route("/v1/proton/{*path}", any(proxy_proton))
         .route("/v1/{*path}", any(proxy_agent))
@@ -213,9 +218,6 @@ async fn session(
 }
 
 async fn proxy_agent(State(state): State<Arc<UiState>>, request: Request) -> Response {
-    if request.uri().path().starts_with("/v1/internal/") {
-        return json_error(StatusCode::NOT_FOUND, "not found");
-    }
     proxy_to(&state.socket_path, request, "gateway agent").await
 }
 
@@ -289,33 +291,6 @@ async fn exchange(
         Ok(None) => Err(false),
         Ok(Some(result)) => Ok(result),
     }
-}
-
-/// A JSON request to the agent from the console itself.
-async fn call_agent(
-    state: &UiState,
-    method: Method,
-    path: &str,
-    body: Value,
-) -> Option<(StatusCode, Value)> {
-    let mut headers = HeaderMap::new();
-    headers.insert(
-        header::CONTENT_TYPE,
-        HeaderValue::from_static("application/json"),
-    );
-    let (parts, body) = exchange(
-        &state.socket_path,
-        method,
-        path,
-        headers,
-        body.to_string().into_bytes(),
-    )
-    .await
-    .ok()?;
-    Some((
-        parts.status,
-        serde_json::from_slice(&body).unwrap_or(Value::Null),
-    ))
 }
 
 async fn authenticate(State(state): State<Arc<UiState>>, request: Request, next: Next) -> Response {
@@ -481,11 +456,20 @@ async fn logout(
     response
 }
 
-async fn telegram_recovery_available(state: &UiState) -> bool {
-    matches!(
-        call_agent(state, Method::GET, "/v1/alerts", Value::Null).await,
-        Some((status, body)) if status.is_success() && !body["settings"]["telegram"].is_null()
-    )
+/// Recovery settings for the account page; the SMTP password is never returned.
+fn recovery_view(recovery: &EmailRecovery) -> Value {
+    let smtp = &recovery.smtp;
+    json!({
+        "email": recovery.email,
+        "smtp": {
+            "host": smtp.host,
+            "port": smtp.port,
+            "security": smtp.security,
+            "username": smtp.username,
+            "from": smtp.from,
+            "passwordSet": !smtp.password.is_empty(),
+        },
+    })
 }
 
 async fn get_account(State(state): State<Arc<UiState>>) -> Response {
@@ -498,7 +482,7 @@ async fn get_account(State(state): State<Arc<UiState>>) -> Response {
         json!({
             "username": account.username,
             "passwordChangedAt": (account.password_changed_at > 0).then_some(account.password_changed_at),
-            "recovery": {"telegram": telegram_recovery_available(&state).await},
+            "recovery": account.recovery.as_ref().map(recovery_view),
         }),
     )
 }
@@ -511,6 +495,73 @@ struct AccountUpdate {
     username: Option<String>,
     #[serde(default)]
     new_password: Option<String>,
+    /// Omitted: unchanged. `null`: recovery by email turned off.
+    #[serde(default, deserialize_with = "optional_field")]
+    recovery: Option<Option<RecoveryUpdate>>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RecoveryUpdate {
+    email: String,
+    smtp: SmtpUpdate,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SmtpUpdate {
+    host: String,
+    port: u16,
+    #[serde(default)]
+    security: Security,
+    #[serde(default)]
+    username: String,
+    /// Empty keeps the saved password when the username is unchanged.
+    #[serde(default)]
+    password: String,
+    from: String,
+}
+
+/// Distinguishes an omitted field (`None`) from an explicit `null` (`Some(None)`).
+fn optional_field<'de, T, D>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    T: Deserialize<'de>,
+    D: serde::Deserializer<'de>,
+{
+    Option::<T>::deserialize(deserializer).map(Some)
+}
+
+fn merge_recovery(
+    current: Option<&EmailRecovery>,
+    update: Option<Option<RecoveryUpdate>>,
+) -> Result<Option<EmailRecovery>> {
+    let update = match update {
+        None => return Ok(current.cloned()),
+        Some(None) => return Ok(None),
+        Some(Some(update)) => update,
+    };
+    let username = update.smtp.username.trim().to_owned();
+    let password = if update.smtp.password.is_empty() {
+        current
+            .filter(|saved| saved.smtp.username == username)
+            .map(|saved| saved.smtp.password.clone())
+            .unwrap_or_default()
+    } else {
+        update.smtp.password
+    };
+    let recovery = EmailRecovery {
+        email: update.email.trim().to_owned(),
+        smtp: Smtp {
+            host: update.smtp.host.trim().to_owned(),
+            port: update.smtp.port,
+            security: update.smtp.security,
+            username,
+            password,
+            from: update.smtp.from.trim().to_owned(),
+        },
+    };
+    recovery.validate()?;
+    Ok(Some(recovery))
 }
 
 async fn update_account(
@@ -534,12 +585,16 @@ async fn update_account(
         record_failure(&state, client).await;
         return json_error(StatusCode::FORBIDDEN, "the current password is wrong");
     }
+    let recovery = match merge_recovery(current.recovery.as_ref(), update.recovery) {
+        Ok(recovery) => recovery,
+        Err(error) => return json_error(StatusCode::BAD_REQUEST, &format!("{error:#}")),
+    };
     let username = update
         .username
         .map(|username| username.trim().to_owned())
         .filter(|username| !username.is_empty())
         .unwrap_or_else(|| current.username.clone());
-    let updated = match update.new_password.filter(|password| !password.is_empty()) {
+    let mut updated = match update.new_password.filter(|password| !password.is_empty()) {
         Some(password) => match hash_account(&state, username, password).await {
             Ok(account) => account,
             Err(error) => return json_error(StatusCode::BAD_REQUEST, &format!("{error:#}")),
@@ -554,6 +609,7 @@ async fn update_account(
             }
         }
     };
+    updated.recovery = recovery;
     if let Err(error) = state.accounts.save(&updated) {
         return json_error(StatusCode::INTERNAL_SERVER_ERROR, &format!("{error:#}"));
     }
@@ -573,6 +629,7 @@ async fn update_account(
             "username": updated.username,
             "passwordChanged": password_changed,
             "passwordChangedAt": (updated.password_changed_at > 0).then_some(updated.password_changed_at),
+            "recovery": updated.recovery.as_ref().map(recovery_view),
         }),
     )
 }
@@ -581,11 +638,51 @@ fn code_hash(code: &str) -> [u8; 32] {
     Sha256::digest(code.as_bytes()).into()
 }
 
+/// How the console is named in emails: the address the browser used.
+fn console_name(request: &Request) -> String {
+    request
+        .headers()
+        .get(header::HOST)
+        .and_then(|value| value.to_str().ok())
+        .filter(|host| host.len() <= 255)
+        .unwrap_or("the console")
+        .to_owned()
+}
+
+async fn test_recovery_email(State(state): State<Arc<UiState>>, request: Request) -> Response {
+    let console = console_name(&request);
+    let recovery = match state.accounts.load() {
+        Ok(account) => account.recovery,
+        Err(error) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, &format!("{error:#}")),
+    };
+    let Some(recovery) = recovery else {
+        return json_error(
+            StatusCode::BAD_REQUEST,
+            "password recovery by email is not set up",
+        );
+    };
+    match recovery.send_test(&console).await {
+        Ok(()) => json_response(StatusCode::OK, json!({"sent": true, "to": recovery.email})),
+        Err(error) => json_error(StatusCode::BAD_GATEWAY, &format!("{error:#}")),
+    }
+}
+
 async fn request_recovery(State(state): State<Arc<UiState>>, request: Request) -> Response {
     let client = client_address(&request);
+    let console = console_name(&request);
     if blocked(&state, &client).await {
         return too_many_attempts();
     }
+    let recovery_settings = match state.accounts.load() {
+        Ok(account) => account.recovery,
+        Err(error) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, &format!("{error:#}")),
+    };
+    let Some(settings) = recovery_settings else {
+        return json_error(
+            StatusCode::CONFLICT,
+            "Password recovery by email is not set up. Reset the password on the server with scripts/reset-console-password.sh.",
+        );
+    };
     let mut recovery = state.recovery.lock().await;
     if recovery
         .last_sent
@@ -597,34 +694,24 @@ async fn request_recovery(State(state): State<Arc<UiState>>, request: Request) -
         );
     }
     let code = format!("{:08}", rand::rng().random_range(0..100_000_000_u32));
-    match call_agent(
-        &state,
-        Method::POST,
-        "/v1/internal/recovery-code",
-        json!({"code": code}),
-    )
-    .await
-    {
-        Some((status, _)) if status.is_success() => {
-            recovery.pending = Some(PendingCode {
-                hash: code_hash(&code),
-                expires: Instant::now() + RECOVERY_CODE_LIFETIME,
-                attempts: 0,
-            });
-            recovery.last_sent = Some(Instant::now());
-            warn!(%client, "console password recovery code sent by Telegram");
-            json_response(StatusCode::OK, json!({"sent": true, "channel": "telegram"}))
-        }
-        Some((StatusCode::CONFLICT, _)) => json_error(
-            StatusCode::CONFLICT,
-            "Password recovery needs Telegram alerts, which are not set up. Reset the password on the server with scripts/reset-console-password.sh.",
-        ),
-        Some((_, body)) => json_error(
+    if let Err(error) = settings.send_recovery_code(&code, &console).await {
+        warn!(%client, error = %format!("{error:#}"), "could not email a console password recovery code");
+        return json_error(
             StatusCode::BAD_GATEWAY,
-            body["error"].as_str().unwrap_or("could not send the code"),
-        ),
-        None => json_error(StatusCode::BAD_GATEWAY, "gateway agent unavailable"),
+            "the code could not be emailed; check the mail settings or reset the password on the server",
+        );
     }
+    recovery.pending = Some(PendingCode {
+        hash: code_hash(&code),
+        expires: Instant::now() + RECOVERY_CODE_LIFETIME,
+        attempts: 0,
+    });
+    recovery.last_sent = Some(Instant::now());
+    warn!(%client, "console password recovery code emailed");
+    json_response(
+        StatusCode::OK,
+        json!({"sent": true, "to": settings.masked_email()}),
+    )
 }
 
 #[derive(Deserialize)]
@@ -673,20 +760,21 @@ async fn reset_with_code(State(state): State<Arc<UiState>>, request: Request) ->
         // Single use.
         recovery.pending = None;
     }
-    let username = match state.accounts.load() {
-        Ok(account) => account.username,
-        Err(_) => account::DEFAULT_USERNAME.into(),
+    let (username, recovery_settings) = match state.accounts.load() {
+        Ok(account) => (account.username, account.recovery),
+        Err(_) => (account::DEFAULT_USERNAME.into(), None),
     };
-    let account = match hash_account(&state, username, reset.new_password).await {
+    let mut account = match hash_account(&state, username, reset.new_password).await {
         Ok(account) => account,
         Err(error) => return json_error(StatusCode::BAD_REQUEST, &format!("{error:#}")),
     };
+    account.recovery = recovery_settings;
     if let Err(error) = state.accounts.save(&account) {
         return json_error(StatusCode::INTERNAL_SERVER_ERROR, &format!("{error:#}"));
     }
     state.sessions.lock().await.clear();
     state.failures.lock().await.remove(&client);
-    warn!(%client, "console password reset with a Telegram recovery code");
+    warn!(%client, "console password reset with an emailed recovery code");
     signed_in(&state, &account).await
 }
 
@@ -1121,15 +1209,6 @@ mod tests {
         .await;
         // Past authentication and CSRF; the agent socket is absent in this test.
         assert_eq!(valid.status(), StatusCode::BAD_GATEWAY);
-        let internal = send(
-            &mut router,
-            Method::POST,
-            "/v1/internal/recovery-code",
-            &[("cookie", &cookie), ("x-csrf-token", &csrf)],
-            None,
-        )
-        .await;
-        assert_eq!(internal.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
@@ -1327,47 +1406,191 @@ mod tests {
         );
     }
 
-    /// A fake agent answering /v1/internal/recovery-code with `status`, which
-    /// hands back the code it received.
-    fn fake_agent(
-        directory: &Path,
-        status: &'static str,
-    ) -> (PathBuf, tokio::sync::mpsc::UnboundedReceiver<String>) {
-        let socket_path = directory.join("agent.sock");
-        let listener = tokio::net::UnixListener::bind(&socket_path).unwrap();
+    /// A minimal SMTP server that hands back the body of every message it accepts.
+    async fn fake_smtp() -> (u16, tokio::sync::mpsc::UnboundedReceiver<String>) {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
         let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
         tokio::spawn(async move {
-            use tokio::io::{AsyncReadExt, AsyncWriteExt};
-            while let Ok((mut stream, _)) = listener.accept().await {
-                let mut buffer = vec![0_u8; 4096];
-                let length = stream.read(&mut buffer).await.unwrap();
-                let request = String::from_utf8_lossy(&buffer[..length]).into_owned();
-                if let Some(code) = request.split("\"code\":\"").nth(1) {
-                    let _ = sender.send(code[..8].to_owned());
-                }
-                let body = if status.starts_with("200") {
-                    r#"{"sent":true}"#
-                } else {
-                    r#"{"error":"Telegram is not configured"}"#
-                };
-                let _ = stream
-                    .write_all(format!("HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes())
-                    .await;
+            while let Ok((stream, _)) = listener.accept().await {
+                let sender = sender.clone();
+                tokio::spawn(async move {
+                    let (reader, mut writer) = stream.into_split();
+                    let mut lines = BufReader::new(reader).lines();
+                    writer.write_all(b"220 fake ESMTP\r\n").await.unwrap();
+                    let mut message = String::new();
+                    let mut in_data = false;
+                    while let Ok(Some(line)) = lines.next_line().await {
+                        if in_data {
+                            if line == "." {
+                                in_data = false;
+                                let _ = sender.send(std::mem::take(&mut message));
+                                writer.write_all(b"250 queued\r\n").await.unwrap();
+                            } else {
+                                message.push_str(&line);
+                                message.push('\n');
+                            }
+                            continue;
+                        }
+                        let command = line.split_whitespace().next().unwrap_or("").to_uppercase();
+                        let reply: &[u8] = match command.as_str() {
+                            "DATA" => {
+                                in_data = true;
+                                b"354 go ahead\r\n"
+                            }
+                            "QUIT" => {
+                                let _ = writer.write_all(b"221 bye\r\n").await;
+                                break;
+                            }
+                            _ => b"250 ok\r\n",
+                        };
+                        writer.write_all(reply).await.unwrap();
+                    }
+                });
             }
         });
-        (socket_path, receiver)
+        (port, receiver)
+    }
+
+    fn recovery_settings(port: u16) -> Value {
+        json!({
+            "email": "envin@example.com",
+            "smtp": {"host": "127.0.0.1", "port": port, "security": "none", "from": "Exit Gateway <gateway@example.com>"},
+        })
+    }
+
+    fn code_in(message: &str) -> String {
+        message
+            .lines()
+            .map(str::trim)
+            .find(|line| line.len() == 8 && line.bytes().all(|byte| byte.is_ascii_digit()))
+            .unwrap_or_else(|| panic!("no code in:\n{message}"))
+            .to_owned()
     }
 
     #[tokio::test]
-    async fn telegram_recovery_resets_the_password_with_a_single_use_code() {
-        let sockets = tempfile::tempdir().unwrap();
-        let (socket_path, mut codes) = fake_agent(sockets.path(), "200 OK");
+    async fn recovery_settings_need_the_current_password_and_hide_the_smtp_password() {
         let Fixture {
             mut router,
+            state,
             _directory: _keep,
             ..
-        } = fixture(socket_path);
-        let (old_session, _) = signed_in_session(&mut router, PASSWORD).await;
+        } = fixture(PathBuf::from("/nonexistent"));
+        let (cookie, csrf) = signed_in_session(&mut router, PASSWORD).await;
+        let headers = [("cookie", cookie.as_str()), ("x-csrf-token", csrf.as_str())];
+        let mut settings = json!({
+            "email": "envin@example.com",
+            "smtp": {"host": "smtp.example.com", "port": 587, "security": "starttls", "username": "envin@example.com", "password": "app-password", "from": "envin@example.com"},
+        });
+        let wrong = send(
+            &mut router,
+            Method::PUT,
+            "/auth/account",
+            &headers,
+            Some(json!({"currentPassword": "not the password", "recovery": settings})),
+        )
+        .await;
+        assert_eq!(wrong.status(), StatusCode::FORBIDDEN);
+        let saved = send(
+            &mut router,
+            Method::PUT,
+            "/auth/account",
+            &headers,
+            Some(json!({"currentPassword": PASSWORD, "recovery": settings})),
+        )
+        .await;
+        assert_eq!(saved.status(), StatusCode::OK);
+        let view = send(
+            &mut router,
+            Method::GET,
+            "/auth/account",
+            &[("cookie", &cookie)],
+            None,
+        )
+        .await;
+        let view = json_body(view).await;
+        assert_eq!(view["recovery"]["smtp"]["passwordSet"], true);
+        assert!(!view.to_string().contains("app-password"));
+
+        // An empty password keeps the saved one; other account changes keep recovery.
+        settings["smtp"]["password"] = json!("");
+        settings["smtp"]["port"] = json!(465);
+        settings["smtp"]["security"] = json!("tls");
+        send(
+            &mut router,
+            Method::PUT,
+            "/auth/account",
+            &headers,
+            Some(json!({"currentPassword": PASSWORD, "recovery": settings})),
+        )
+        .await;
+        send(
+            &mut router,
+            Method::PUT,
+            "/auth/account",
+            &headers,
+            Some(json!({"currentPassword": PASSWORD, "newPassword": NEW_PASSWORD})),
+        )
+        .await;
+        let recovery = state.accounts.load().unwrap().recovery.unwrap();
+        assert_eq!(
+            (recovery.smtp.port, recovery.smtp.password.as_str()),
+            (465, "app-password")
+        );
+
+        let invalid = send(&mut router, Method::PUT, "/auth/account", &headers, Some(json!({"currentPassword": NEW_PASSWORD, "recovery": {"email": "nope", "smtp": settings["smtp"]}}))).await;
+        assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+        let off = send(
+            &mut router,
+            Method::PUT,
+            "/auth/account",
+            &headers,
+            Some(json!({"currentPassword": NEW_PASSWORD, "recovery": null})),
+        )
+        .await;
+        assert_eq!(off.status(), StatusCode::OK);
+        assert!(state.accounts.load().unwrap().recovery.is_none());
+    }
+
+    #[tokio::test]
+    async fn email_recovery_resets_the_password_with_a_single_use_code() {
+        let (port, mut mail) = fake_smtp().await;
+        let Fixture {
+            mut router,
+            state,
+            _directory: _keep,
+            ..
+        } = fixture(PathBuf::from("/nonexistent"));
+        let (old_session, csrf) = signed_in_session(&mut router, PASSWORD).await;
+        let headers = [
+            ("cookie", old_session.as_str()),
+            ("x-csrf-token", csrf.as_str()),
+        ];
+        let saved = send(
+            &mut router,
+            Method::PUT,
+            "/auth/account",
+            &headers,
+            Some(json!({"currentPassword": PASSWORD, "recovery": recovery_settings(port)})),
+        )
+        .await;
+        assert_eq!(saved.status(), StatusCode::OK);
+        let test = send(
+            &mut router,
+            Method::POST,
+            "/auth/recovery/test",
+            &headers,
+            None,
+        )
+        .await;
+        assert_eq!(test.status(), StatusCode::OK);
+        assert!(
+            mail.recv()
+                .await
+                .unwrap()
+                .contains("will be sent to this address")
+        );
 
         let sent = send(
             &mut router,
@@ -1378,8 +1601,10 @@ mod tests {
         )
         .await;
         assert_eq!(sent.status(), StatusCode::OK);
-        let code = codes.recv().await.unwrap();
-        assert!(code.bytes().all(|byte| byte.is_ascii_digit()));
+        assert_eq!(json_body(sent).await["to"], "e•••@example.com");
+        let message = mail.recv().await.unwrap();
+        assert!(message.contains("console.test"), "{message}");
+        let code = code_in(&message);
         // Asking again right away is refused.
         let again = send(
             &mut router,
@@ -1443,6 +1668,8 @@ mod tests {
             login(&mut router, "admin", NEW_PASSWORD).await.status(),
             StatusCode::OK
         );
+        // The reset keeps the recovery settings.
+        assert!(state.accounts.load().unwrap().recovery.is_some());
 
         let reused = send(
             &mut router,
@@ -1495,14 +1722,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn recovery_without_telegram_points_to_the_server_reset() {
-        let sockets = tempfile::tempdir().unwrap();
-        let (socket_path, _) = fake_agent(sockets.path(), "409 Conflict");
+    async fn recovery_without_email_points_to_the_server_reset() {
         let Fixture {
             mut router,
             _directory: _keep,
             ..
-        } = fixture(socket_path);
+        } = fixture(PathBuf::from("/nonexistent"));
         let response = send(
             &mut router,
             Method::POST,

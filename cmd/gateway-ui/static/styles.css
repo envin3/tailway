@@ -110,6 +110,8 @@ input:focus, select:focus { outline: 3px solid #b7ddd7; border-color: var(--teal
 .link-button:hover { background: none; color: var(--teal); }
 .sign-out { justify-self: start; margin-top: 8px; padding: 6px 10px; color: #e9f1ee; background: #203c3e; font-size: 12px; }
 .sign-out:hover { background: #315052; }
+.field-row { display: grid; grid-template-columns: minmax(0, 1fr) 110px; gap: 12px; }
+#mail-form { margin-top: 14px; }
 .account-note { margin: 0 0 8px; font-size: 13px; }
 .account-panel .toggle input { width: auto; accent-color: var(--teal); }
 .alert-channel { display: grid; gap: 14px; margin: 0; padding: 16px; border: 1px solid var(--line); border-radius: 5px; }
@@ -195,6 +197,7 @@ dialog label { display: grid; gap: 7px; margin-top: 22px; font-size: 13px; font-
   .account-panel dl { grid-template-columns: 1fr; gap: 12px; }
   .account-panel form button, #proton-logout { width: 100%; min-height: 44px; }
   .inline-field { flex-direction: column; }
+  .field-row { grid-template-columns: 1fr; }
   .form-actions button { flex: 1; }
   .exit-card header { align-items: flex-start; flex-wrap: wrap; gap: 8px; }
   .exit-meta { grid-template-columns: 1fr; }

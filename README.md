@@ -102,8 +102,15 @@ Open `https://<HOST_BIND_IP>:8443` and sign in.
 **Changing the account.** The **Console account** page changes the username and password, and asks for the current password either way. A new password must be 12–72 characters. Changing it signs out every other session.
 
 **A forgotten password** can be reset in two ways:
-- **From the sign-in page:** choose **Forgot password?** to send an 8-digit code to the Telegram chat set up on the **Alerts** page. The code is valid for 10 minutes, allows five attempts, and works once; a new code can be requested once a minute. Codes go only to Telegram, never to a webhook, whose topic may be readable by others.
-- **On the server,** in the app directory while the stack runs: `scripts/reset-console-password.sh [username]`. The change applies immediately and ends every session.
+- **By email, from the sign-in page.** First set up **Password recovery by email** on the **Console account** page:
+  - a recovery address;
+  - the SMTP server that sends mail to it: STARTTLS (usually port 587), TLS (usually port 465), or no encryption for a relay on the local network only;
+  - with Gmail or iCloud, an app password.
+
+  Changing these settings needs the current console password, because whoever controls them can reset the password. **Save and send test email** confirms delivery. The SMTP password is never shown again.
+
+  Then **Forgot password?** on the sign-in page emails an 8-digit code. The code is valid for 10 minutes, allows five attempts, and works once; a new code can be requested once a minute. The sign-in page shows only a masked address (`e•••@example.com`).
+- **On the server,** in the app directory while the stack runs: `scripts/reset-console-password.sh [username]`. The change applies immediately and ends every session. Recovery settings are kept.
 
 Requests to the agent and broker time out after 30 seconds.
 

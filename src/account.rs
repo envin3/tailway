@@ -5,6 +5,7 @@
 //! still works as the `admin` account until the account is first changed.
 //! The file is re-read when it changes on disk, so a reset made with
 //! `gateway-ui reset-password` applies without a restart and ends every session.
+//! The account also holds the email settings for password recovery.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -14,6 +15,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+
+use crate::mail::EmailRecovery;
 
 pub const DEFAULT_USERNAME: &str = "admin";
 pub const MIN_PASSWORD_LENGTH: usize = 12;
@@ -31,6 +34,9 @@ pub struct Account {
     /// Unix seconds; 0 when the password was set outside the console.
     #[serde(default)]
     pub password_changed_at: u64,
+    /// Where and how password reset codes are emailed; `None` disables recovery.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery: Option<EmailRecovery>,
 }
 
 impl Account {
@@ -59,6 +65,7 @@ pub fn new_account_with_cost(username: &str, password: &str, cost: u32) -> Resul
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs(),
+        recovery: None,
     })
 }
 
@@ -138,6 +145,9 @@ impl AccountStore {
 
     pub fn save(&self, account: &Account) -> Result<()> {
         validate_username(&account.username)?;
+        if let Some(recovery) = &account.recovery {
+            recovery.validate()?;
+        }
         fs::create_dir_all(&self.directory)?;
         let mut temporary = tempfile::NamedTempFile::new_in(&self.directory)?;
         std::io::Write::write_all(&mut temporary, &serde_json::to_vec_pretty(account)?)?;
@@ -177,6 +187,7 @@ fn read_account(path: &Path) -> Result<Account> {
             username: DEFAULT_USERNAME.into(),
             password_hash: hash.into(),
             password_changed_at: 0,
+            recovery: None,
         });
     }
     serde_json::from_str(&content).context("parse the console account")

@@ -20,13 +20,13 @@
 
       <form id="recovery-form" class="hidden">
         <h1>Reset password</h1>
-        <p>A one-time code is sent to the Telegram chat set up for alerts. It is valid for 10 minutes.</p>
+        <p>A one-time code is emailed to the account's recovery address. It is valid for 10 minutes.</p>
         <button type="button" id="send-code">Send code</button>
         <label>Code<input id="recovery-code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{8}" maxlength="8" required></label>
         <label>New password<input id="recovery-password" type="password" autocomplete="new-password" minlength="12" maxlength="72" required></label>
         <label>Repeat new password<input id="recovery-confirm" type="password" autocomplete="new-password" minlength="12" maxlength="72" required></label>
         <button>Reset and sign in</button>
-        <p class="login-note">No Telegram? On the server, in the app directory, run <code>scripts/reset-console-password.sh</code>.</p>
+        <p class="login-note">No recovery email set up? On the server, in the app directory, run <code>scripts/reset-console-password.sh</code>.</p>
         <button type="button" class="link-button" id="show-login">Back to sign in</button>
       </form>
       <p id="login-message" class="form-result" role="status"></p>
