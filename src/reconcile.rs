@@ -18,6 +18,7 @@ use crate::policy::{self, MARK_MASK};
 use crate::probe;
 use crate::state::Store;
 use crate::tailscale::Provider;
+use crate::usage;
 use crate::wireguard;
 
 /// WireGuard renegotiates every two minutes while packets flow, and every tunnel
@@ -143,7 +144,48 @@ impl Reconciler {
             unassigned: UnassignedPolicy::Block,
             dns_port: self.config.dns.map(|dns| dns.port),
         })?;
-        self.apply_ruleset(&compiled.ruleset).await
+        self.apply_ruleset(&compiled.ruleset).await?;
+        self.apply_usage_table().await
+    }
+
+    /// Installs (or re-asserts) the observe-only table that records which
+    /// devices send Internet traffic through the gateway. Keeps its data.
+    async fn apply_usage_table(&self) -> Result<()> {
+        fs::create_dir_all(&self.config.runtime_directory)?;
+        let path = self.config.runtime_directory.join("usage.nft");
+        fs::write(&path, usage::ruleset(&self.config.tailscale_interface))
+            .context("write the usage table")?;
+        if self.config.dry_run {
+            return Ok(());
+        }
+        let path = path.to_string_lossy().into_owned();
+        self.runner.run("nft", ["-f", &path]).await?;
+        Ok(())
+    }
+
+    /// Seconds since each tailnet address last sent Internet traffic through
+    /// the gateway (within `usage::WINDOW`); empty if unavailable.
+    pub async fn exit_usage(&self) -> HashMap<Ipv4Addr, u64> {
+        if self.config.dry_run {
+            return HashMap::new();
+        }
+        match self
+            .runner
+            .run(
+                "nft",
+                ["-j", "list", "set", "inet", usage::TABLE, usage::SET],
+            )
+            .await
+        {
+            Ok(output) => usage::parse(&output).unwrap_or_else(|error| {
+                warn!(%error, "cannot read exit node usage");
+                HashMap::new()
+            }),
+            Err(error) => {
+                warn!(%error, "cannot read exit node usage");
+                HashMap::new()
+            }
+        }
     }
 
     fn published(&self) -> std::sync::MutexGuard<'_, Published> {
@@ -255,6 +297,10 @@ impl Reconciler {
             runtime.unknown_nodes = compiled.unknown_nodes;
         }
         self.apply_ruleset(&compiled.ruleset).await?;
+        if let Err(error) = self.apply_usage_table().await {
+            // Observation only: never let it fail routing.
+            warn!(%error, "cannot install the exit node usage table");
+        }
         self.reset_moved_connections(&runtime.applied_routes, &compiled.routes)
             .await;
         runtime.applied_routes = compiled.routes;

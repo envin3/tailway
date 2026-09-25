@@ -350,13 +350,18 @@ const certificateFact = () => {
 /* Devices */
 
 const DEVICE_FILTERS = [
-  ["all", "All"], ["online", "Online"], ["vpn", "Through VPN"], ["novpn", "Without VPN"], ["default", "Default"]
+  ["all", "All"], ["online", "Online"], ["exit", "Using this gateway"], ["vpn", "Through VPN"], ["novpn", "Without VPN"], ["default", "Default"]
 ];
+
+// Whether the device sends its Internet traffic here, i.e. selected this gateway
+// as its Tailscale exit node (seen from traffic; Tailscale does not report it).
+const usesGateway = device => Boolean(device.exitNode?.inUse);
 
 const deviceMatchesFilter = (device, filter) => {
   const kind = routeOf(device).kind;
   switch (filter) {
     case "online": return device.online;
+    case "exit": return usesGateway(device);
     case "vpn": return kind === "vpn";
     case "novpn": return kind === "direct" || kind === "local";
     case "default": return kind === "default";
@@ -376,6 +381,13 @@ const osLabel = os => ({ ios: "iOS", android: "Android", macos: "macOS", windows
 
 const routeStatus = device => {
   const route = routeOf(device);
+  const exitKnown = Boolean(device.exitNode);
+  if (exitKnown && device.online && !usesGateway(device) && route.kind !== "default") {
+    return { tone: "", icon: "info", text: "Has no effect until this device selects the gateway as its exit node in Tailscale" };
+  }
+  if (route.kind === "default" && usesGateway(device) && defaultPolicy() === "block") {
+    return { tone: "warn", icon: "block", text: "Uses this gateway, but its Internet is blocked: choose a route" };
+  }
   if (route.kind === "default") {
     const policy = defaultPolicy();
     if (policy === "block") return { tone: "", icon: "block", text: "No Internet through this gateway until you choose a route" };
@@ -439,6 +451,18 @@ const dnsPanel = device => {
     </form>`;
 };
 
+const exitBadge = device => {
+  const exit = device.exitNode;
+  if (!exit) return "";
+  const minutes = Math.round((exit.windowSeconds || 900) / 60);
+  if (exit.inUse) {
+    const ago = exit.lastTrafficSecondsAgo < 60 ? "just now" : relativeTime(Date.now() - exit.lastTrafficSecondsAgo * 1000);
+    return `<span class="badge good" title="Last Internet traffic through this gateway ${escapeHTML(ago)}">${icon("check")}Using this gateway</span>`;
+  }
+  if (!device.online) return "";
+  return `<span class="badge" title="No Internet traffic through this gateway in the last ${minutes} minutes">Exit node not selected</span>`;
+};
+
 const renderDevices = ({ force = false } = {}) => {
   const list = $("#device-list");
   // Never replace controls someone is using; the next refresh catches up.
@@ -470,7 +494,7 @@ const renderDevices = ({ force = false } = {}) => {
           <div class="device-main">
             <div class="device-id">
               <span class="device-icon">${icon(osIcon(device.os))}<span class="dot ${device.online ? "good" : ""}" title="${device.online ? "Online" : "Offline"}"></span></span>
-              <span class="device-name"><strong>${escapeHTML(device.displayName || device.nodeId)}</strong><small>${escapeHTML(meta)}</small></span>
+              <span class="device-name"><span class="name-line"><strong>${escapeHTML(device.displayName || device.nodeId)}</strong>${exitBadge(device)}</span><small>${escapeHTML(meta)}</small></span>
             </div>
             <div class="route">
               <select data-route aria-label="Route for ${escapeHTML(device.displayName || device.nodeId)}" class="${busyNow ? "busy" : ""}" ${busyNow ? "disabled" : ""}>${routeOptions(device)}</select>

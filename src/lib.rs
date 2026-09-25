@@ -13,4 +13,5 @@ pub mod proton;
 pub mod reconcile;
 pub mod state;
 pub mod tailscale;
+pub mod usage;
 pub mod wireguard;

@@ -191,12 +191,17 @@ async fn get_devices(State(api): State<Arc<Api>>) -> Response {
         .map(|assignment| (assignment.node_id, assignment.exit_id))
         .collect();
     let resolver = api.reconciler.dns();
+    let usage = api.reconciler.exit_usage().await;
     let mut result: Vec<_> = devices
         .into_iter()
         .map(|device| {
             let exit_id = assignments.remove(&device.node_id).unwrap_or_default();
             let dns = resolver
                 .map(|resolver| device_dns(resolver, &device, dns_settings.get(&device.node_id)));
+            let last_exit_traffic = device.addresses.iter().find_map(|address| match address {
+                std::net::IpAddr::V4(address) => usage.get(address).copied(),
+                std::net::IpAddr::V6(_) => None,
+            });
             let mut value = serde_json::to_value(device).expect("serialize device");
             if !exit_id.is_empty() {
                 value["exitId"] = json!(exit_id);
@@ -204,6 +209,13 @@ async fn get_devices(State(api): State<Arc<Api>>) -> Response {
             if let Some(dns) = dns {
                 value["dns"] = dns;
             }
+            // Traffic to the Internet through this gateway means the device has
+            // selected it as its exit node (Tailscale does not report that).
+            value["exitNode"] = json!({
+                "inUse": last_exit_traffic.is_some(),
+                "lastTrafficSecondsAgo": last_exit_traffic,
+                "windowSeconds": crate::usage::WINDOW.as_secs(),
+            });
             value
         })
         .collect();

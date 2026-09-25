@@ -246,7 +246,10 @@ input[type="checkbox"] { width: auto; min-height: 0; accent-color: var(--primary
 .device-icon { position: relative; display: grid; place-items: center; width: 42px; height: 42px; border-radius: 11px; background: var(--surface-2); border: 1px solid var(--border); color: var(--muted); flex: none; }
 .device-icon .dot { position: absolute; right: -3px; bottom: -3px; width: 12px; height: 12px; border: 2px solid var(--surface); }
 .device-name { min-width: 0; }
-.device-name strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.device-name strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.name-line { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.name-line .badge { flex: none; }
+.name-line .badge svg { width: 13px; height: 13px; }
 .device-name small { color: var(--muted); font-size: 13px; }
 .route { display: grid; gap: 6px; }
 .route-status { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--muted); min-height: 20px; }
