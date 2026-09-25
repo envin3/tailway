@@ -3,153 +3,188 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Exit Gateway Console</title>
+  <meta name="color-scheme" content="light dark">
+  <title>Exit Gateway</title>
   <link rel="stylesheet" href="/styles.css">
 </head>
 <body>
-  <div class="shell">
-    <aside>
-      <div class="brand"><span class="brand-mark">E</span><span>Exit Gateway</span></div>
-      <nav aria-label="Console views">
-        <button class="nav-item active" data-view="overview">Overview</button>
-        <button class="nav-item" data-view="account">Proton account</button>
-        <button class="nav-item" data-view="servers">Server selector</button>
-        <button class="nav-item" data-view="exits">Active exits</button>
-        <button class="nav-item" data-view="devices">Nodes</button>
-        <button class="nav-item" data-view="alerts">Alerts</button>
-        <button class="nav-item" data-view="console-account">Console account</button>
+  <div class="app">
+    <aside class="sidebar" id="sidebar">
+      <div class="brand"><span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 2 4 5v6c0 5 3.4 9.4 8 11 4.6-1.6 8-6 8-11V5l-8-3Z"/></svg></span><span>Exit Gateway</span></div>
+      <nav class="nav" aria-label="Main">
+        <a href="#/dashboard" data-nav="dashboard"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M4 13h6V4H4v9Zm0 7h6v-5H4v5Zm10 0h6v-9h-6v9Zm0-16v5h6V4h-6Z"/></svg><span>Dashboard</span></a>
+        <a href="#/devices" data-nav="devices"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M4 6h16v10H4V6Zm-2 12h20v2H2v-2Z"/></svg><span>Devices</span><span class="nav-count" id="nav-device-count"></span></a>
+        <a href="#/locations" data-nav="locations"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20Zm6.9 6h-3a15.7 15.7 0 0 0-1.4-3.6A8 8 0 0 1 18.9 8ZM12 4c.8 1.2 1.5 2.5 1.9 4h-3.8c.4-1.5 1.1-2.8 1.9-4ZM4.3 14a8.2 8.2 0 0 1 0-4h3.4a16.5 16.5 0 0 0 0 4H4.3Zm.8 2h3a15.7 15.7 0 0 0 1.4 3.6A8 8 0 0 1 5.1 16Zm3-8h-3a8 8 0 0 1 4.4-3.6C8.9 5.5 8.4 6.7 8.1 8ZM12 20c-.8-1.2-1.5-2.5-1.9-4h3.8c-.4 1.5-1.1 2.8-1.9 4Zm2.3-6H9.7a14.7 14.7 0 0 1 0-4h4.6a14.7 14.7 0 0 1 0 4Zm.2 5.6c.6-1.1 1.1-2.3 1.4-3.6h3a8 8 0 0 1-4.4 3.6Zm1.8-5.6a16.5 16.5 0 0 0 0-4h3.4a8.2 8.2 0 0 1 0 4h-3.4Z"/></svg><span>Locations</span></a>
+        <a href="#/settings" data-nav="settings"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M19.4 13a7.6 7.6 0 0 0 0-2l2.1-1.6-2-3.5-2.5 1a7.4 7.4 0 0 0-1.7-1L15 3h-4l-.4 2.9c-.6.3-1.2.6-1.7 1l-2.5-1-2 3.5L6.6 11a7.6 7.6 0 0 0 0 2l-2.1 1.6 2 3.5 2.5-1c.5.4 1.1.7 1.7 1L11 21h4l.4-2.9c.6-.3 1.2-.6 1.7-1l2.5 1 2-3.5-2.2-1.6ZM13 15.5a3.5 3.5 0 1 1 0-7 3.5 3.5 0 0 1 0 7Z"/></svg><span>Settings</span></a>
       </nav>
-      <div class="adapter"><span>Signed in as</span><strong id="signed-in-user"></strong><button id="sign-out" class="sign-out">Sign out</button></div>
+      <div class="sidebar-footer">
+        <div class="user"><span class="avatar" id="user-avatar" aria-hidden="true">?</span><span><small>Signed in as</small><strong id="signed-in-user"></strong></span></div>
+        <button class="ghost small" id="sign-out" type="button"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M10 17v-2h4v-2h-4v-2l-3 3 3 3Zm9-14H9a2 2 0 0 0-2 2v4h2V5h10v14H9v-4H7v4a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V5a2 2 0 0 0-2-2Z"/></svg>Sign out</button>
+      </div>
     </aside>
-    <main>
-      <header>
-        <div><p class="eyebrow">Tailscale policy router</p><h1 id="view-title">Overview</h1></div>
-        <div class="health"><span id="health-dot"></span><span id="health-label">Connecting</span></div>
+    <div class="scrim" id="scrim" hidden></div>
+
+    <div class="main">
+      <header class="topbar">
+        <button class="icon-button menu-button" id="menu-button" type="button" aria-label="Open menu" aria-controls="sidebar" aria-expanded="false"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M3 6h18v2H3V6Zm0 5h18v2H3v-2Zm0 5h18v2H3v-2Z"/></svg></button>
+        <h1 id="page-title">Dashboard</h1>
+        <a class="health-pill" id="health-pill" href="#/dashboard"><span class="dot"></span><span id="health-text">Connecting…</span></a>
       </header>
-      <div id="alert" class="alert hidden" role="alert"></div>
 
-      <section id="overview" class="view active">
-        <div class="metrics">
-          <article><span>Agent state</span><strong id="metric-state">Unknown</strong></article>
-          <article><span>Active exits</span><strong id="metric-exits">0</strong></article>
-          <article><span>Assigned devices</span><strong id="metric-devices">0</strong></article>
-          <article><span>Policy revision</span><strong id="metric-revision">0</strong></article>
-        </div>
-        <div class="section-heading"><div><h2>Routing posture</h2><p>VPN failures remain blocked; Direct Internet is used only where it is chosen.</p></div><button id="refresh">Refresh</button></div>
-        <div class="posture-grid">
-          <div><span id="posture-default-status" class="posture-status good">Blocked</span><h3>Unassigned nodes</h3><p id="posture-default-text">Nodes without an assignment follow UNASSIGNED_POLICY.</p></div>
-          <div><span class="posture-status good">Enforced</span><h3>IPv6 forwarding</h3><p>The first release exposes IPv4 routing only.</p></div>
-          <div><span class="posture-status good">Masked</span><h3>Connection marks</h3><p>Only the router-owned mark range is changed.</p></div>
-        </div>
-      </section>
-
-      <section id="account" class="view">
-        <div class="section-heading"><div><h2>Proton VPN account</h2><p>The password is sent only to Proton during sign-in and is not stored by this service.</p></div></div>
-        <div class="account-panel">
-          <form id="proton-login-form" class="hidden">
-            <label>Username<input id="proton-username" autocomplete="username" required maxlength="320"></label>
-            <label>Password<input id="proton-password" type="password" autocomplete="current-password" required maxlength="1024"></label>
-            <button>Sign in</button>
-          </form>
-          <form id="proton-totp-form" class="hidden">
-            <label>Two-factor code<input id="proton-totp" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}|[0-9]{8}" required maxlength="8"></label>
-            <button>Verify</button>
-          </form>
-          <div id="proton-account-summary" class="hidden">
-            <dl><div><dt>Account</dt><dd id="proton-account-name"></dd></div><div><dt>Plan</dt><dd id="proton-plan"></dd></div><div><dt>Connections</dt><dd id="proton-connections"></dd></div><div><dt>Core version</dt><dd id="proton-core-version"></dd></div><div><dt>Certificate</dt><dd id="proton-certificate"></dd></div></dl>
-            <button id="proton-logout" class="danger">Sign out</button>
+      <main class="content" id="content">
+        <section class="view" data-view="dashboard">
+          <div class="hero" id="hero"></div>
+          <div class="stats" id="stats"></div>
+          <div class="grid-2">
+            <article class="card">
+              <header class="card-header"><h2>VPN locations</h2><a class="link" href="#/locations">Manage</a></header>
+              <div id="dashboard-locations"></div>
+            </article>
+            <article class="card">
+              <header class="card-header"><h2>Gateway</h2><a class="link" href="#/settings">Settings</a></header>
+              <dl class="facts" id="dashboard-facts"></dl>
+            </article>
           </div>
-          <div id="proton-unavailable" class="hidden"><strong>Account broker unavailable</strong><p>Start the broker container to enable Proton login and live server discovery.</p></div>
-        </div>
-      </section>
+        </section>
 
-      <section id="alerts" class="view">
-        <div class="section-heading"><div><h2>Alerts</h2><p>Notifications when an exit fails, the Proton session or certificate renewal needs attention, or Tailscale stops. The Proxmox host watchdog uses the same channels.</p></div></div>
-        <div class="account-panel">
-          <form id="alert-form">
-            <fieldset class="alert-channel">
-              <legend><label class="toggle"><input type="checkbox" id="telegram-enabled"> Telegram</label></legend>
-              <ol class="hint"><li>Create a bot with @BotFather and paste its token.</li><li>Send the bot a message (or add it to a group), then choose Detect chat.</li></ol>
-              <label>Bot token<input id="telegram-token" type="password" autocomplete="off" spellcheck="false" maxlength="100"></label>
-              <label>Chat ID<span class="inline-field"><input id="telegram-chat" autocomplete="off" spellcheck="false" maxlength="32"><button type="button" id="telegram-detect" class="secondary">Detect chat</button></span></label>
-              <div id="telegram-chats" class="chat-list"></div>
-            </fieldset>
-            <fieldset class="alert-channel">
-              <legend><label class="toggle"><input type="checkbox" id="webhook-enabled"> Webhook</label></legend>
-              <label>URL<input id="webhook-url" type="url" autocomplete="off" spellcheck="false" maxlength="2048" placeholder="https://ntfy.sh/your-random-topic"></label>
-              <label>Format<select id="webhook-format"><option value="ntfy">ntfy</option><option value="json">JSON</option></select></label>
-            </fieldset>
-            <div class="form-actions"><button id="alert-save">Save</button><button type="button" id="alert-test" class="secondary">Save and send test</button></div>
-            <p id="alert-result" class="form-result" role="status"></p>
-          </form>
-          <h3 class="panel-subheading">Current conditions</h3>
-          <div id="alert-active" class="alert-active"></div>
-        </div>
-      </section>
+        <section class="view" data-view="devices">
+          <p class="lead">Choose where each device's Internet traffic goes. Devices must use this gateway as their Tailscale exit node.</p>
+          <div class="toolbar">
+            <label class="search"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M10 4a6 6 0 1 0 3.5 10.9l4.8 4.8 1.4-1.4-4.8-4.8A6 6 0 0 0 10 4Zm0 2a4 4 0 1 1 0 8 4 4 0 0 1 0-8Z"/></svg><input id="device-search" type="search" placeholder="Search devices" autocomplete="off" aria-label="Search devices"></label>
+            <div class="chips" id="device-filters" role="group" aria-label="Filter devices"></div>
+          </div>
+          <div class="device-list" id="device-list"></div>
+          <div id="missing-devices"></div>
+        </section>
 
-      <section id="console-account" class="view">
-        <div class="section-heading"><div><h2>Console account</h2><p>The sign-in for this console. Changing the password signs out every other browser.</p></div></div>
-        <div class="account-panel">
-          <form id="console-account-form">
-            <label>Username<input id="account-username" autocomplete="username" autocapitalize="none" spellcheck="false" required maxlength="64"></label>
-            <label>New password (leave empty to keep the current one)<input id="account-new-password" type="password" autocomplete="new-password" minlength="12" maxlength="72"></label>
-            <label>Repeat new password<input id="account-confirm-password" type="password" autocomplete="new-password" maxlength="72"></label>
-            <label>Current password<input id="account-current-password" type="password" autocomplete="current-password" required maxlength="128"></label>
-            <button>Save</button>
-            <p id="account-result" class="form-result" role="status"></p>
-          </form>
-          <p id="account-changed" class="account-note"></p>
-          <h3 class="panel-subheading">Password recovery by email</h3>
-          <p id="account-recovery" class="account-note"></p>
-          <form id="mail-form">
-            <label class="toggle"><input type="checkbox" id="mail-enabled"> Email reset codes</label>
-            <label>Recovery email<input id="mail-email" type="email" autocomplete="email" spellcheck="false" maxlength="254"></label>
-            <div class="field-row">
-              <label>SMTP server<input id="smtp-host" autocomplete="off" spellcheck="false" maxlength="253" placeholder="smtp.gmail.com"></label>
-              <label>Port<input id="smtp-port" type="number" min="1" max="65535" value="587"></label>
-            </div>
-            <label>Security<select id="smtp-security"><option value="starttls">STARTTLS (usually port 587)</option><option value="tls">TLS (usually port 465)</option><option value="none">None (local relay only)</option></select></label>
-            <label>SMTP username<input id="smtp-username" autocomplete="off" spellcheck="false" maxlength="254"></label>
-            <label>SMTP password<input id="smtp-password" type="password" autocomplete="new-password" maxlength="256"></label>
-            <label>From<input id="smtp-from" autocomplete="off" spellcheck="false" maxlength="320" placeholder="Exit Gateway &lt;you@example.com&gt;"></label>
-            <label>Current console password<input id="mail-current-password" type="password" autocomplete="current-password" required maxlength="128"></label>
-            <div class="form-actions"><button>Save</button><button type="button" id="mail-test" class="secondary">Save and send test email</button></div>
-            <p id="mail-result" class="form-result" role="status"></p>
-          </form>
-        </div>
-      </section>
+        <section class="view" data-view="locations">
+          <div class="section-head">
+            <p class="lead">Proton VPN servers your devices can use. A tunnel starts when the first device picks a location and stops when the last one leaves.</p>
+            <button id="add-location" type="button"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M11 5h2v6h6v2h-6v6h-2v-6H5v-2h6V5Z"/></svg>Add location</button>
+          </div>
+          <div class="location-grid" id="location-grid"></div>
+        </section>
 
-      <section id="servers" class="view">
-        <div class="section-heading"><div><h2>Proton VPN servers</h2><p id="server-source">Imported WireGuard configurations available for routing.</p></div></div>
-        <div class="toolbar"><input id="server-search" type="search" placeholder="Search country, city, or server" autocomplete="off"><span id="server-count"></span></div>
-        <fieldset id="server-feature-filters" class="feature-filters" aria-label="Server features">
-          <label><input type="checkbox" value="secure-core">Secure Core</label>
-          <label><input type="checkbox" value="p2p">P2P</label>
-          <label><input type="checkbox" value="streaming">Streaming</label>
-        </fieldset>
-        <div id="server-list" class="server-list"></div>
-        <div class="pagination"><button id="server-page-prev" class="secondary">Previous</button><span id="server-page-label">1 / 1</span><button id="server-page-next" class="secondary">Next</button></div>
-      </section>
+        <section class="view" data-view="settings">
+          <div class="tabs" role="tablist" aria-label="Settings">
+            <a href="#/settings/proton" role="tab" data-tab="proton">Proton VPN</a>
+            <a href="#/settings/notifications" role="tab" data-tab="notifications">Notifications</a>
+            <a href="#/settings/account" role="tab" data-tab="account">Account &amp; security</a>
+          </div>
 
-      <section id="exits" class="view">
-        <div class="section-heading"><div><h2>Active Proton exits</h2><p>Each distinct selected server has one shared tunnel.</p></div></div>
-        <div id="exit-list" class="exit-grid"></div>
-      </section>
+          <div class="tab-panel" data-panel="proton">
+            <article class="card narrow">
+              <header class="card-header"><h2>Proton VPN account</h2><span class="badge" id="proton-badge"></span></header>
+              <div id="proton-unavailable" hidden><p class="muted">The Proton account service is not responding. It starts with the gateway; check the broker container if this persists.</p></div>
+              <form id="proton-login-form" class="form" hidden>
+                <p class="muted">Sign in to discover servers and keep tunnel certificates renewed. Your password goes only to Proton and is not stored here.</p>
+                <label class="field"><span>Email or username</span><input id="proton-username" autocomplete="username" required maxlength="320"></label>
+                <label class="field"><span>Password</span><input id="proton-password" type="password" autocomplete="current-password" required maxlength="1024"></label>
+                <div class="actions"><button>Sign in to Proton</button></div>
+              </form>
+              <form id="proton-totp-form" class="form" hidden>
+                <p class="muted">Enter the code from your authenticator app.</p>
+                <label class="field"><span>Two-factor code</span><input id="proton-totp" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}|[0-9]{8}" required maxlength="8"></label>
+                <div class="actions"><button>Verify</button></div>
+              </form>
+              <div id="proton-summary" hidden>
+                <dl class="facts" id="proton-facts"></dl>
+                <div class="actions"><button class="danger-outline" id="proton-logout" type="button">Sign out of Proton</button></div>
+              </div>
+            </article>
+          </div>
 
-      <section id="devices" class="view">
-        <div class="section-heading"><div><h2>Tailnet nodes</h2><p>Select Proton VPN, direct Internet, or local-only access for each node.</p></div></div>
-        <div class="toolbar"><input id="node-search" type="search" placeholder="Search node name or address" autocomplete="off"><span id="node-count"></span></div>
-        <div class="table-wrap"><table><thead><tr><th>Node</th><th>Tailnet address</th><th>State</th><th>Gateway activity</th><th>VPN server</th><th>DNS</th></tr></thead><tbody id="device-list"></tbody></table></div>
-      </section>
-    </main>
+          <div class="tab-panel" data-panel="notifications">
+            <form id="alert-form" class="stack">
+              <article class="card narrow">
+                <header class="card-header"><h2>Telegram</h2><label class="switch"><input type="checkbox" id="telegram-enabled"><span aria-hidden="true"></span><span class="sr-only">Send alerts to Telegram</span></label></header>
+                <div class="channel-body" data-channel="telegram">
+                  <ol class="steps"><li>In Telegram, message <strong>@BotFather</strong>, send <code>/newbot</code>, and paste the token here.</li><li>Send your new bot any message (or add it to a group), then choose <strong>Find chat</strong>.</li></ol>
+                  <label class="field"><span>Bot token</span><input id="telegram-token" type="password" autocomplete="off" spellcheck="false" maxlength="100"></label>
+                  <label class="field"><span>Chat</span><span class="input-row"><input id="telegram-chat" autocomplete="off" spellcheck="false" maxlength="32" placeholder="Chat ID"><button type="button" id="telegram-detect" class="secondary">Find chat</button></span></label>
+                  <div id="telegram-chats" class="choice-list"></div>
+                </div>
+              </article>
+              <article class="card narrow">
+                <header class="card-header"><h2>Webhook</h2><label class="switch"><input type="checkbox" id="webhook-enabled"><span aria-hidden="true"></span><span class="sr-only">Send alerts to a webhook</span></label></header>
+                <div class="channel-body" data-channel="webhook">
+                  <p class="muted">An <a href="https://ntfy.sh" target="_blank" rel="noopener">ntfy</a> topic or any endpoint that accepts JSON.</p>
+                  <label class="field"><span>URL</span><input id="webhook-url" type="url" autocomplete="off" spellcheck="false" maxlength="2048" placeholder="https://ntfy.sh/your-random-topic"></label>
+                  <label class="field"><span>Format</span><select id="webhook-format"><option value="ntfy">ntfy</option><option value="json">JSON</option></select></label>
+                </div>
+              </article>
+              <div class="actions narrow"><button>Save</button><button type="button" id="alert-test" class="secondary">Save and send test</button></div>
+            </form>
+            <article class="card narrow">
+              <header class="card-header"><h2>Current problems</h2></header>
+              <p class="muted small-print">You are notified when a problem lasts beyond its grace period, and again when it clears.</p>
+              <div id="alert-active"></div>
+            </article>
+          </div>
+
+          <div class="tab-panel" data-panel="account">
+            <article class="card narrow">
+              <header class="card-header"><h2>Sign-in details</h2></header>
+              <form id="console-account-form" class="form">
+                <label class="field"><span>Username</span><input id="account-username" autocomplete="username" autocapitalize="none" spellcheck="false" required maxlength="64"></label>
+                <label class="field"><span>New password <em>optional</em></span><input id="account-new-password" type="password" autocomplete="new-password" minlength="12" maxlength="72" placeholder="Leave empty to keep the current one"></label>
+                <label class="field"><span>Repeat new password</span><input id="account-confirm-password" type="password" autocomplete="new-password" maxlength="72"></label>
+                <label class="field"><span>Current password</span><input id="account-current-password" type="password" autocomplete="current-password" required maxlength="128"></label>
+                <p class="muted small-print" id="account-changed"></p>
+                <div class="actions"><button>Save changes</button></div>
+              </form>
+            </article>
+            <article class="card narrow">
+              <header class="card-header"><h2>Password recovery by email</h2><label class="switch"><input type="checkbox" id="mail-enabled"><span aria-hidden="true"></span><span class="sr-only">Email reset codes</span></label></header>
+              <p class="muted" id="account-recovery"></p>
+              <form id="mail-form" class="form">
+                <div class="channel-body" data-channel="mail">
+                  <label class="field"><span>Recovery email</span><input id="mail-email" type="email" autocomplete="email" spellcheck="false" maxlength="254"></label>
+                  <div class="field-row">
+                    <label class="field"><span>SMTP server</span><input id="smtp-host" autocomplete="off" spellcheck="false" maxlength="253" placeholder="smtp.gmail.com"></label>
+                    <label class="field"><span>Port</span><input id="smtp-port" type="number" min="1" max="65535" value="587"></label>
+                  </div>
+                  <label class="field"><span>Security</span><select id="smtp-security"><option value="starttls">STARTTLS (usually port 587)</option><option value="tls">TLS (usually port 465)</option><option value="none">None (local relay only)</option></select></label>
+                  <label class="field"><span>SMTP username</span><input id="smtp-username" autocomplete="off" spellcheck="false" maxlength="254"></label>
+                  <label class="field"><span>SMTP password</span><input id="smtp-password" type="password" autocomplete="new-password" maxlength="256"></label>
+                  <label class="field"><span>From <em>optional</em></span><input id="smtp-from" autocomplete="off" spellcheck="false" maxlength="320" placeholder="Exit Gateway &lt;you@example.com&gt;"></label>
+                </div>
+                <label class="field"><span>Current console password</span><input id="mail-current-password" type="password" autocomplete="current-password" required maxlength="128"></label>
+                <div class="actions"><button>Save</button><button type="button" id="mail-test" class="secondary">Save and send test email</button></div>
+              </form>
+            </article>
+          </div>
+        </section>
+      </main>
+    </div>
   </div>
-  <dialog id="exit-dialog">
-    <form method="dialog" id="exit-form">
-      <p class="eyebrow">Create Proton exit</p><h2 id="dialog-server">Server</h2>
-      <label>Exit name<input id="exit-name" maxlength="48" required></label>
-      <div class="dialog-actions"><button value="cancel" class="secondary">Cancel</button><button id="confirm-exit" value="default">Create exit</button></div>
+
+  <dialog id="location-dialog" class="sheet" aria-labelledby="location-dialog-title">
+    <header class="sheet-header">
+      <button type="button" class="icon-button" id="location-back" aria-label="Back to countries" hidden><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M15.4 7.4 14 6l-6 6 6 6 1.4-1.4L10.8 12l4.6-4.6Z"/></svg></button>
+      <h2 id="location-dialog-title">Add a VPN location</h2>
+      <button type="button" class="icon-button" id="location-close" aria-label="Close"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m18.3 5.7-1.4-1.4L12 9.2 7.1 4.3 5.7 5.7l4.9 4.9-4.9 4.9 1.4 1.4 4.9-4.9 4.9 4.9 1.4-1.4-4.9-4.9 4.9-4.9Z"/></svg></button>
+    </header>
+    <div class="sheet-tools">
+      <label class="search"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M10 4a6 6 0 1 0 3.5 10.9l4.8 4.8 1.4-1.4-4.8-4.8A6 6 0 0 0 10 4Zm0 2a4 4 0 1 1 0 8 4 4 0 0 1 0-8Z"/></svg><input id="location-search" type="search" placeholder="Search countries, cities, servers" autocomplete="off" aria-label="Search"></label>
+      <div class="chips" id="feature-filters" role="group" aria-label="Server features">
+        <button type="button" class="chip" data-feature="p2p" aria-pressed="false">P2P</button>
+        <button type="button" class="chip" data-feature="streaming" aria-pressed="false">Streaming</button>
+        <button type="button" class="chip" data-feature="secure-core" aria-pressed="false">Secure Core</button>
+      </div>
+    </div>
+    <div class="sheet-body" id="location-body"></div>
+  </dialog>
+
+  <dialog id="confirm-dialog" class="confirm" aria-labelledby="confirm-title">
+    <form method="dialog">
+      <h2 id="confirm-title"></h2>
+      <p id="confirm-text" class="muted"></p>
+      <div class="actions end"><button value="cancel" class="secondary">Cancel</button><button value="confirm" id="confirm-button">Confirm</button></div>
     </form>
   </dialog>
+
+  <div class="toasts" id="toasts" aria-live="polite"></div>
   <script src="/app.js" defer></script>
 </body>
 </html>

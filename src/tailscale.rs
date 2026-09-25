@@ -39,6 +39,9 @@ struct Peer {
     tailscale_ips: Vec<String>,
     online: bool,
     active: bool,
+    #[serde(rename = "OS")]
+    os: String,
+    last_seen: String,
 }
 
 impl Provider {
@@ -79,6 +82,10 @@ fn parse(output: &[u8]) -> Result<Snapshot> {
             addresses,
             online: peer.online,
             active: peer.active,
+            os: peer.os,
+            // Tailscale reports the zero time for devices it has not seen offline.
+            last_seen: Some(peer.last_seen)
+                .filter(|seen| !seen.is_empty() && !seen.starts_with("0001-")),
         });
     }
     devices.sort_by(|left, right| left.node_id.cmp(&right.node_id));
@@ -115,6 +122,22 @@ mod tests {
         assert_eq!(peer.tailscale_ips, ["100.64.0.10", "fd7a:115c:a1e0::1"]);
         assert_eq!(display_name(peer), "laptop");
         assert!(peer.active);
+    }
+
+    #[test]
+    fn reports_os_and_a_real_last_seen_time_only() {
+        let snapshot = parse(
+            br#"{"BackendState":"Running","Peer":{
+                "a":{"ID":"a","HostName":"phone","OS":"iOS","LastSeen":"2026-09-24T14:09:15.1Z","TailscaleIPs":["100.64.0.1"]},
+                "b":{"ID":"b","HostName":"server","OS":"linux","LastSeen":"0001-01-01T00:00:00Z","TailscaleIPs":["100.64.0.2"]}}}"#,
+        )
+        .unwrap();
+        let phone = &snapshot.devices[0];
+        assert_eq!(
+            (phone.os.as_str(), phone.last_seen.as_deref()),
+            ("iOS", Some("2026-09-24T14:09:15.1Z"))
+        );
+        assert_eq!(snapshot.devices[1].last_seen, None);
     }
 
     #[test]

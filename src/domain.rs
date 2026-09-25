@@ -84,6 +84,12 @@ pub struct Device {
     pub addresses: Vec<IpAddr>,
     pub online: bool,
     pub active: bool,
+    /// Operating system as Tailscale reports it (`iOS`, `macOS`, `linux`, …).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub os: String,
+    /// When an offline device was last connected (RFC 3339), if known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_seen: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

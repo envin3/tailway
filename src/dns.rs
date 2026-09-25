@@ -458,6 +458,8 @@ mod tests {
             addresses: vec![IpAddr::V4(Ipv4Addr::new(100, 64, 0, last_octet))],
             online: true,
             active: true,
+            os: String::new(),
+            last_seen: None,
         }
     }
 
