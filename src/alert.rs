@@ -214,7 +214,7 @@ pub async fn deliver(
     format: Format,
     source: String,
 ) {
-    let client = match reqwest::Client::builder().timeout(DELIVERY_TIMEOUT).build() {
+    let client = match client() {
         Ok(client) => client,
         Err(error) => {
             warn!(%error, "cannot build alert HTTP client; alerts are logged only");
@@ -235,6 +235,12 @@ pub async fn deliver(
             }
         }
     }
+}
+
+fn client() -> reqwest::Result<reqwest::Client> {
+    // A no-op when a provider is already installed.
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    reqwest::Client::builder().timeout(DELIVERY_TIMEOUT).build()
 }
 
 async fn post(
@@ -390,6 +396,11 @@ mod tests {
                 ("exit:b".into(), "resolved"),
             ]
         );
+    }
+
+    #[test]
+    fn builds_the_https_client() {
+        client().unwrap();
     }
 
     #[test]
