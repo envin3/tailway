@@ -207,6 +207,7 @@ The agent sends a notification when a problem outlasts its grace period, and ano
 | Tailscale on the gateway is not running | 3 min |
 | The Proton session is signed out, or the broker is unreachable | 10 min (polled every 5 min) |
 | Certificate renewal is not running, or the certificate expires within 24 h | none |
+| A device routed through a VPN stops using the gateway as its exit node (it used it before, is online, and sent no Internet traffic through the gateway for 15 minutes) | 10 min |
 
 The agent also sends an info message whenever it starts, so restarts are visible. Without a channel, alerts are still logged. The console shows the notified ones in its banner and health indicator, and `GET /v1/status` lists all current conditions under `alerts`.
 

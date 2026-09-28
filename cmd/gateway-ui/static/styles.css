@@ -242,15 +242,18 @@ input[type="checkbox"] { width: auto; min-height: 0; accent-color: var(--primary
 /* Devices */
 .device-list { display: grid; gap: 10px; }
 .device { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow); }
-.device-main { display: grid; grid-template-columns: minmax(0, 1.3fr) minmax(220px, 1fr); gap: 16px; align-items: center; padding: 14px 16px; }
+.device-main { display: grid; grid-template-columns: minmax(0, 1.2fr) 160px minmax(220px, 1fr); gap: 16px; align-items: center; padding: 14px 16px; }
+.device-columns { display: grid; grid-template-columns: minmax(0, 1.2fr) 160px minmax(220px, 1fr); gap: 16px; padding: 0 17px; margin-bottom: -10px; color: var(--muted); font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; }
+.exit-cell { display: grid; justify-items: start; gap: 3px; min-width: 0; }
+.exit-cell small { color: var(--muted); font-size: 12px; }
+.exit-cell .badge svg { width: 13px; height: 13px; }
+.cell-label { display: none; }
+.device.missing .device-main { grid-template-columns: minmax(0, 1fr) auto; }
 .device-id { display: flex; align-items: center; gap: 12px; min-width: 0; }
 .device-icon { position: relative; display: grid; place-items: center; width: 42px; height: 42px; border-radius: 11px; background: var(--surface-2); border: 1px solid var(--border); color: var(--muted); flex: none; }
 .device-icon .dot { position: absolute; right: -3px; bottom: -3px; width: 12px; height: 12px; border: 2px solid var(--surface); }
 .device-name { min-width: 0; }
 .device-name strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
-.name-line { display: flex; align-items: center; gap: 8px; min-width: 0; }
-.name-line .badge { flex: none; }
-.name-line .badge svg { width: 13px; height: 13px; }
 .device-name small { color: var(--muted); font-size: 13px; }
 .route { display: grid; gap: 6px; }
 .route-status { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--muted); min-height: 20px; }
@@ -375,6 +378,9 @@ input[type="file"] { padding: 7px 10px; }
   .menu-button { display: inline-flex; margin-left: -6px; }
   .topbar h1 { font-size: 19px; }
   .device-main { grid-template-columns: minmax(0, 1fr); gap: 12px; }
+  .device-columns { display: none; }
+  .exit-cell { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; }
+  .cell-label { display: inline; color: var(--muted); font-size: 13px; font-weight: 600; }
 }
 @media (max-width: 560px) {
   .health-pill #health-text { display: none; }

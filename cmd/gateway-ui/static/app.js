@@ -362,7 +362,7 @@ const certificateFact = () => {
 /* Devices */
 
 const DEVICE_FILTERS = [
-  ["all", "All"], ["online", "Online"], ["exit", "Using this gateway"], ["vpn", "Through VPN"], ["novpn", "Without VPN"], ["default", "Default"]
+  ["all", "All"], ["online", "Online"], ["exit", "Exit node selected"], ["vpn", "Through VPN"], ["novpn", "Without VPN"], ["default", "Default"]
 ];
 
 // Whether the device sends its Internet traffic here, i.e. selected this gateway
@@ -470,16 +470,25 @@ const dnsPanel = device => {
     </form>`;
 };
 
-const exitBadge = device => {
+// Whether the device has this gateway selected as its exit node, seen from its traffic.
+const exitCell = device => {
   const exit = device.exitNode;
-  if (!exit) return "";
-  const minutes = Math.round((exit.windowSeconds || 900) / 60);
-  if (exit.inUse) {
+  const minutes = Math.round((exit?.windowSeconds || 900) / 60);
+  let badge = `<span class="muted">—</span>`;
+  let note = "";
+  if (exit?.inUse) {
     const ago = exit.lastTrafficSecondsAgo < 60 ? "just now" : relativeTime(Date.now() - exit.lastTrafficSecondsAgo * 1000);
-    return `<span class="badge good" title="Last Internet traffic through this gateway ${escapeHTML(ago)}">${icon("check")}Using this gateway</span>`;
+    badge = `<span class="badge good">${icon("check")}Selected</span>`;
+    note = `Traffic ${ago}`;
+  } else if (exit && !device.online) {
+    badge = `<span class="badge">Unknown</span>`;
+    note = "Device offline";
+  } else if (exit) {
+    // Not selected matters when a VPN route is waiting on it.
+    badge = `<span class="badge ${routeOf(device).kind === "vpn" ? "warn" : ""}">Not selected</span>`;
+    note = `No traffic in ${minutes} min`;
   }
-  if (!device.online) return "";
-  return `<span class="badge" title="No Internet traffic through this gateway in the last ${minutes} minutes">Exit node not selected</span>`;
+  return `<div class="exit-cell"><span class="cell-label">Exit node</span>${badge}${note ? `<small>${escapeHTML(note)}</small>` : ""}</div>`;
 };
 
 const renderDevices = ({ force = false } = {}) => {
@@ -513,8 +522,9 @@ const renderDevices = ({ force = false } = {}) => {
           <div class="device-main">
             <div class="device-id">
               <span class="device-icon">${icon(osIcon(device.os))}<span class="dot ${device.online ? "good" : ""}" title="${device.online ? "Online" : "Offline"}"></span></span>
-              <span class="device-name"><span class="name-line"><strong>${escapeHTML(device.displayName || device.nodeId)}</strong>${exitBadge(device)}</span><small>${escapeHTML(meta)}</small></span>
+              <span class="device-name"><strong>${escapeHTML(device.displayName || device.nodeId)}</strong><small>${escapeHTML(meta)}</small></span>
             </div>
+            ${exitCell(device)}
             <div class="route">
               <select data-route aria-label="Route for ${escapeHTML(device.displayName || device.nodeId)}" class="${busyNow ? "busy" : ""}" ${busyNow ? "disabled" : ""}>${routeOptions(device)}</select>
               <span class="route-status ${status.tone}">${icon(status.icon)}<span>${escapeHTML(status.text)}</span></span>

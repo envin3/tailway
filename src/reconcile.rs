@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
-use std::net::Ipv4Addr;
+use std::net::{IpAddr, Ipv4Addr};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -12,7 +12,8 @@ use tracing::{info, warn};
 
 use crate::catalog::StaticCatalog;
 use crate::dns;
-use crate::domain::{Exit, ExitStatus, UnassignedPolicy};
+use crate::domain::{Exit, ExitStatus, UnassignedPolicy, is_builtin_route};
+use crate::exit_watch::DeviceUse;
 use crate::platform::Runner;
 use crate::policy::{self, MARK_MASK};
 use crate::probe;
@@ -165,6 +166,47 @@ impl Reconciler {
 
     /// Seconds since each tailnet address last sent Internet traffic through
     /// the gateway (within `usage::WINDOW`); empty if unavailable.
+    /// Every tailnet device with its VPN route (if any) and whether it sends
+    /// Internet traffic through the gateway, for the exit node alert.
+    pub async fn device_usage(&self) -> Result<Vec<DeviceUse>> {
+        let desired = self.store.load()?;
+        let devices = self.devices.devices().await?;
+        let usage = self.exit_usage().await;
+        let exits: HashMap<&str, &str> = desired
+            .exits
+            .iter()
+            .map(|exit| (exit.id.as_str(), exit.display_name.as_str()))
+            .collect();
+        let routes: HashMap<&str, &str> = desired
+            .assignments
+            .iter()
+            .filter(|assignment| !is_builtin_route(&assignment.exit_id))
+            .filter_map(|assignment| {
+                exits
+                    .get(assignment.exit_id.as_str())
+                    .map(|name| (assignment.node_id.as_str(), *name))
+            })
+            .collect();
+        Ok(devices
+            .into_iter()
+            .map(|device| DeviceUse {
+                route: routes
+                    .get(device.node_id.as_str())
+                    .map(|name| (*name).to_owned()),
+                using: device.addresses.iter().any(
+                    |address| matches!(address, IpAddr::V4(address) if usage.contains_key(address)),
+                ),
+                name: if device.display_name.is_empty() {
+                    device.node_id.clone()
+                } else {
+                    device.display_name
+                },
+                node_id: device.node_id,
+                online: device.online,
+            })
+            .collect())
+    }
+
     pub async fn exit_usage(&self) -> HashMap<Ipv4Addr, u64> {
         if self.config.dry_run {
             return HashMap::new();

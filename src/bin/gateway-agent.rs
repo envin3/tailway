@@ -12,6 +12,7 @@ use tailway::control::Api;
 use tailway::custom::CustomExits;
 use tailway::dns::{self, DnsServer};
 use tailway::domain::{ExitStatus, UnassignedPolicy};
+use tailway::exit_watch::{self, ExitNodeWatch};
 use tailway::notify::{self, Notifier, SettingsStore};
 use tailway::platform::Runner;
 use tailway::proton::AccountLimits;
@@ -94,7 +95,8 @@ async fn main() -> Result<()> {
     if let Err(error) = &result {
         error!(%error, "initial reconciliation failed; forwarding remains closed");
     }
-    observe_health(&alerts, &reconciler, result.is_err()).await;
+    let mut exit_watch = ExitNodeWatch::default();
+    observe_health(&alerts, &reconciler, &mut exit_watch, result.is_err()).await;
 
     let interval = parse_interval(&environment("RECONCILE_INTERVAL", "30s"));
     let loop_reconciler = reconciler.clone();
@@ -111,7 +113,13 @@ async fn main() -> Result<()> {
             if let Err(error) = &result {
                 error!(%error, "reconciliation failed; forwarding remains closed");
             }
-            observe_health(&loop_alerts, &loop_reconciler, result.is_err()).await;
+            observe_health(
+                &loop_alerts,
+                &loop_reconciler,
+                &mut exit_watch,
+                result.is_err(),
+            )
+            .await;
         }
     });
 
@@ -252,7 +260,12 @@ fn start_alerts() -> Result<(Arc<Alerts>, Arc<Notifier>)> {
     Ok((Arc::new(Alerts::new(Some(sender))), notifier))
 }
 
-async fn observe_health(alerts: &Alerts, reconciler: &Reconciler, reconcile_failed: bool) {
+async fn observe_health(
+    alerts: &Alerts,
+    reconciler: &Reconciler,
+    exit_watch: &mut ExitNodeWatch,
+    reconcile_failed: bool,
+) {
     let (exits, last_error) = reconciler.snapshot().await;
     alerts.observe(
         "reconcile",
@@ -283,6 +296,18 @@ async fn observe_health(alerts: &Alerts, reconciler: &Reconciler, reconcile_fail
         keys.push(key);
     }
     alerts.retain("exit:", &keys);
+
+    // A VPN-routed device that stops using the gateway as its exit node.
+    match reconciler.device_usage().await {
+        Ok(devices) => {
+            for (key, problem) in exit_watch.evaluate(&devices) {
+                alerts.observe(&key, problem, exit_watch::GRACE);
+            }
+            let present: Vec<String> = devices.iter().map(exit_watch::key).collect();
+            alerts.retain(exit_watch::KEY_PREFIX, &present);
+        }
+        Err(error) => warn!(%error, "cannot check which devices use the exit node"),
+    }
 }
 
 async fn watch_account(account_limits: Arc<AccountLimits>, alerts: Arc<Alerts>) {

@@ -165,6 +165,7 @@ fn observe(
 fn title(key: &str) -> String {
     match key.split_once(':') {
         Some(("exit", exit)) => format!("exit {exit}"),
+        Some(("exit-node", device)) => format!("{device} stopped using the gateway"),
         _ => key.replace('-', " "),
     }
 }
@@ -236,6 +237,16 @@ mod tests {
         assert_eq!(resolved[0].kind, "resolved");
         assert_eq!(resolved[0].message, "Recovered after 5m");
         assert!(conditions.is_empty());
+    }
+
+    #[test]
+    fn names_exit_node_alerts_after_the_device() {
+        assert_eq!(
+            title("exit-node:iphone"),
+            "iphone stopped using the gateway"
+        );
+        assert_eq!(title("exit:NL#227"), "exit NL#227");
+        assert_eq!(title("proton-session"), "proton session");
     }
 
     #[test]

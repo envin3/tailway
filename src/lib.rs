@@ -5,6 +5,7 @@ pub mod control;
 pub mod custom;
 pub mod dns;
 pub mod domain;
+pub mod exit_watch;
 pub mod mail;
 pub mod notify;
 pub mod platform;
