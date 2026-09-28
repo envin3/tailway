@@ -1,3 +1,6 @@
+/// This release, from Cargo.toml (Semantic Versioning; see CHANGELOG.md).
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
 pub mod account;
 pub mod alert;
 pub mod catalog;

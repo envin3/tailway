@@ -151,6 +151,7 @@ async fn get_status(State(api): State<Arc<Api>>) -> Response {
     json_response(
         StatusCode::OK,
         json!({
+            "version": crate::VERSION,
             "schemaVersion": SCHEMA_VERSION,
             "revision": desired.revision,
             "appliedRevision": applied_revision,

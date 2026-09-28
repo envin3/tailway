@@ -139,6 +139,10 @@ struct PendingCode {
 async fn main() -> Result<()> {
     tracing_subscriber::fmt().with_target(false).init();
     let arguments: Vec<String> = env::args().skip(1).collect();
+    if arguments.first().map(String::as_str) == Some("--version") {
+        println!("tailway {}", tailway::VERSION);
+        return Ok(());
+    }
     if arguments.first().map(String::as_str) == Some("reset-password") {
         return reset_password(&arguments[1..]);
     }

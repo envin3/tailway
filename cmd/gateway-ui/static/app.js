@@ -287,6 +287,7 @@ const renderChrome = () => {
   pill.className = `health-pill ${tone}`;
   $("#health-text").textContent = !state.loaded && !state.loadError ? "Connecting…"
     : state.loadError ? "Unreachable" : tone === "good" ? "All systems normal" : tone === "warn" ? "Needs a look" : "Needs attention";
+  if (state.status?.version) $("#app-version").textContent = `Tailway ${state.status.version}`;
   const username = state.consoleAccount?.username || "";
   $("#signed-in-user").textContent = username;
   $("#user-avatar").textContent = username.slice(0, 1) || "?";

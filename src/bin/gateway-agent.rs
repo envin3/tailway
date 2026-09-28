@@ -26,6 +26,10 @@ use tracing::{error, info, warn};
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    if env::args().nth(1).as_deref() == Some("--version") {
+        println!("tailway {}", tailway::VERSION);
+        return Ok(());
+    }
     tracing_subscriber::fmt().with_target(false).init();
     let dry_run = environment("DRY_RUN", "false").parse().unwrap_or(false);
     let unassigned: UnassignedPolicy = environment("UNASSIGNED_POLICY", "block").parse()?;
@@ -88,7 +92,7 @@ async fn main() -> Result<()> {
         "gateway agent started",
         format!(
             "Gateway agent {} started; routing is being restored.",
-            env!("CARGO_PKG_VERSION")
+            tailway::VERSION
         ),
     );
     let result = reconciler.reconcile().await;

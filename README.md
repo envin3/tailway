@@ -7,7 +7,8 @@ Tailway turns one machine on your [Tailscale](https://tailscale.com) network int
 - **Fails closed.** When a tunnel stops passing traffic, its devices are blocked instead of falling back to your normal connection. DNS follows the same route, with a kill switch.
 - **A web console** with a dashboard, per-device settings, health checks, alerts (Telegram or webhook), and password recovery by email.
 
-Tailway is an early release. It routes IPv4 only and runs on Linux with Docker.
+> [!WARNING]
+> **Tailway is alpha software** (version `0.1.0-alpha.1`). It works, but it has had little testing outside its first installation. Expect bugs, and expect settings, stored data, and behaviour to change between releases without an upgrade path. Read the [changelog](CHANGELOG.md) before upgrading, and don't rely on it yet where a routing mistake would be costly. It routes IPv4 only and runs on Linux with Docker.
 
 ## Requirements
 
@@ -81,6 +82,10 @@ Importing Proton's downloadable WireGuard configurations, like any other provide
 ## Documentation
 
 [docs/guide.md](docs/guide.md) explains routing, DNS, health checks, alerts, account recovery, backups, and troubleshooting.
+
+## Versions
+
+Tailway follows [Semantic Versioning](https://semver.org); alpha releases are `0.x.y-alpha.N`. [CHANGELOG.md](CHANGELOG.md) lists what each release changes, and [docs/releasing.md](docs/releasing.md) how releases are made. The running version is shown in the console's sidebar and in `GET /v1/status`, or run `docker compose exec gateway-agent gateway-agent --version`.
 
 ## Development
 
