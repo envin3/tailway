@@ -31,6 +31,11 @@ RUN case "$TARGETARCH" in \
     && install -m 0755 "/tmp/tailscale_${TAILSCALE_VERSION}_${TARGETARCH}/tailscaled" /usr/local/bin/tailscaled \
     && rm -rf /var/lib/apt/lists/* /tmp/tailscale*
 
+LABEL org.opencontainers.image.title="Tailway agent" \
+      org.opencontainers.image.description="Per-device VPN routing for a Tailscale exit node" \
+      org.opencontainers.image.source="https://github.com/envin3/tailway" \
+      org.opencontainers.image.licenses="GPL-3.0-or-later"
+
 COPY --from=build /out/gateway-agent /usr/local/bin/gateway-agent
 COPY --from=build /out/gateway-ui /usr/local/bin/gateway-ui
 ENTRYPOINT ["/usr/local/bin/gateway-agent"]

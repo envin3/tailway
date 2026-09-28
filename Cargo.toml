@@ -3,6 +3,9 @@ name = "tailway"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
+description = "Per-device VPN routing for a Tailscale exit node"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/envin3/tailway"
 
 [dependencies]
 anyhow = "1.0"

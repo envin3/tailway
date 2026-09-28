@@ -1,0 +1,154 @@
+# Tailway guide
+
+How Tailway works and how to run it. For installation, see the [README](../README.md).
+
+## How it works
+
+Tailway runs as two containers:
+
+- **`gateway-agent`** runs Tailscale as an exit node, one WireGuard tunnel per VPN location in use, the firewall and routing rules, the DNS forwarder, and the web console. The console runs as a separate unprivileged process inside the same container.
+- **`proton-broker`** holds the Proton session, if you use Proton. It has no network privileges and never returns session or key material through its API.
+
+Every device on the tailnet is identified by its stable Tailscale node ID. Traffic a device sends through the gateway is marked by its route and steered into that route's tunnel through its own routing table. The forwarding policy drops anything not explicitly allowed. Each tunnel's routing table ends in an `unreachable` route, so if a tunnel disappears, its traffic, and the gateway's own DNS queries for it, fail instead of leaving through the host's connection.
+
+## Routes
+
+Each device gets one of these routes on the **Devices** page:
+
+- **A VPN location**: through that location's tunnel. One tunnel is shared by every device using the same location. It starts when the first device picks the location and stops when the last one leaves.
+- **Direct Internet**: through the host's own connection, without a VPN. If the host itself runs a VPN, direct traffic follows it.
+- **Local network only**: tailnet and private addresses only; no Internet.
+- **Default**: follows `UNASSIGNED_POLICY`. The default, `block`, means a new or forgotten device never reaches the Internet through the gateway by accident.
+
+When a device's route changes, its open connections are reset, so existing flows don't keep using the old route.
+
+A route applies only once the device has selected the gateway as its exit node in Tailscale. Tailscale does not tell an exit node who selected it, so Tailway works it out from traffic. A device that sent Internet-bound traffic through the gateway in the last 15 minutes shows **Selected** in the **Exit node** column, including traffic that was then blocked. A device that has the exit node selected but sends nothing for 15 minutes shows **Not selected** until it does.
+
+## Health checks
+
+Every tunnel is checked on each reconcile (every 30 seconds) in two ways.
+
+**Handshakes.** A tunnel is *healthy* when its last WireGuard handshake is under 180 seconds old and *degraded* up to 300 seconds; traffic stays in the tunnel either way. It is *failed* beyond that, or when no handshake arrives within 60 seconds of starting. Failed, missing, or downed tunnels are recreated automatically. Every peer gets `PersistentKeepalive = 25` if its configuration lacks one, so idle tunnels keep handshaking.
+
+**Traffic.** A handshake proves only that the server answers. A provider can complete handshakes for a key it no longer forwards traffic for; Proton does once a certificate expires. So each tunnel with a good handshake also sends real packets:
+
+- a public-address lookup (OpenDNS, falling back to Cloudflare). A successful one shows the location's **public IP** in the console;
+- a query to the tunnel's own DNS resolver, when its configuration names one.
+
+One failed lookup marks the location *degraded*. Two in a row mark it *failed*: its devices are blocked, and the tunnel is recreated then and every ten failures after that. Two unanswered resolver queries in a row mark it *degraded*.
+
+## DNS
+
+By default, Tailscale answers an exit-node client's DNS lookups on the exit node itself, over the exit node's normal connection. The lookups of a VPN-routed device would then leak to your Internet provider, and the gateway couldn't tell which device asked.
+
+Tailway therefore includes a per-device DNS forwarder. In the Tailscale admin console, under **DNS**:
+
+1. Add the gateway's tailnet IPv4 address as a nameserver, then a public resolver (or your home router) as a second one, and turn on **Override DNS servers**.
+2. Keep **Allow local network access** off on devices that use the exit node.
+
+MagicDNS keeps working: devices answer tailnet names themselves and forward only other names. The forwarder sees which device asked:
+
+| Device | Its DNS |
+| --- | --- |
+| Routed to a VPN location | The resolver named in the location's configuration (`DNS =`; `10.2.0.1` for Proton), inside that device's tunnel. Without one, the device's DNS server, still inside the tunnel. |
+| VPN down, kill switch on (the default) | Nothing resolves (`SERVFAIL`) |
+| VPN down, kill switch off | The device's DNS server, over the host's connection |
+| Direct, Local only, Default, or not using the exit node | The device's DNS server (default `DNS_DEFAULT_SERVER`, `9.9.9.9`) |
+
+Change a device's kill switch or DNS server in its **DNS** panel on the **Devices** page. `DNS_KILL_SWITCH_DEFAULT` sets the default kill switch; `DNS_FORWARDER=false` turns the forwarder off.
+
+Only tailnet addresses (`100.64.0.0/10`) are answered. Until the gateway's Tailscale is running with the tailnet's device list, every lookup gets `SERVFAIL`, because an unknown device would otherwise be sent to the default server. After a restart this normally lasts a few seconds.
+
+If the gateway is down, devices not using the exit node keep resolving through the second nameserver. Devices using it get no DNS until it returns, because their traffic still goes to the unavailable exit node.
+
+## Any WireGuard VPN
+
+On **Locations**, choose **Import WireGuard**, then pick the `.conf` file or paste it. Give it a name, a provider, and a country; a file named like `mullvad-ch-zrh-wg-001.conf` fills these in. The location then appears in every device's route menu, under its provider.
+
+- **Requirements:** exactly one `[Peer]`, with an `Endpoint` and `AllowedIPs` including `0.0.0.0/0`. Otherwise WireGuard would drop what the gateway sends into the tunnel. IPv6 addresses are ignored.
+- **Ignored settings:** `wg-quick`-only settings are dropped and never run: `PostUp` and the other scripts, `Table`, `FwMark`, `MTU`, and `SaveConfig`.
+- **DNS:** the `DNS =` line names the tunnel's resolver.
+- **Storage:** each configuration is a private file (`0600`) in `state/custom-exits/`, named by a random ID. The API never returns it.
+- **Removing:** once no device uses a location, **Remove** deletes it, including its private key.
+- **Keys:** key rotation is the provider's business. If a provider revokes or replaces a key, import the new configuration. The health checks mark a tunnel that stops passing traffic as failed, and alert.
+
+## Proton VPN
+
+Proton support is unofficial; see the README. Sign in under **Settings → Proton VPN**. The password and two-factor code go only to Proton, through the broker; they are not stored. The broker keeps a refreshable session in `proton-broker-state/` with owner-only permissions. Protect and back up that directory like a password.
+
+**Add Proton server** on **Locations** browses Proton's servers by country, with load and feature filters. Adding one generates its WireGuard profile in `proton-configs/`. Profiles are never returned to the browser or the routing API.
+
+- **Keys:** each Proton location gets its own WireGuard key, because Proton lets a key be active on only one server at a time. Several tunnels sharing a key keep taking the session from each other, and each drops traffic for seconds at a time.
+- **Certificates:** Proton authorises each key with a certificate valid for about a week. With an expired certificate, Proton servers still complete handshakes but forward nothing. The broker renews each certificate when Proton's refresh time passes, and checks every profile against its key at startup and every five minutes, rewriting any that don't match. A new sign-in renews every certificate and keeps the keys.
+- **Connection limit:** Proton's connection limit counts Proton tunnels only. At the limit, a new Proton location is refused, but devices can still share or switch existing ones.
+- **Library version:** the broker pins Proton's `proton-vpn-api-core`. Proton's package repository keeps only its latest release, so when a build fails on the version check, raise `PROTON_CORE_VERSION` to the version the repository serves.
+
+## Console account
+
+The console account is created on the first visit. Sign-up closes as soon as it exists. To set the password in advance instead, so sign-up never appears, run `scripts/create-ui-secrets.sh` before starting. Change the username and password on **Settings → Account & security**. Changing the password signs out every other session.
+
+**Sessions** use an `HttpOnly`, `Secure`, `SameSite=Strict` cookie that expires after 30 minutes idle or 12 hours, plus a per-session CSRF token for every change. Sign-in must come from the console's own origin. Ten failed attempts from one address within five minutes block that address for the rest of the window. Existing sessions keep working. Behind `tailscale serve`, all clients share one address for this limit.
+
+**A forgotten password** can be reset two ways:
+
+- **By email.** Set up **Password recovery by email** on **Settings → Account & security**: a recovery address, and an SMTP server to send from. For Gmail or iCloud, use an app password. Changing these settings needs the current password, because whoever controls them can reset it. **Forgot password?** on the sign-in page then emails an 8-digit code that works once, for 10 minutes, with five attempts.
+- **On the server**, while the stack runs: `scripts/reset-console-password.sh [username]`. It also works on a Proxmox host whose LXC runs the gateway; set `GATEWAY_CTID` to that LXC's ID.
+
+## Alerts
+
+Set up notifications on **Settings → Notifications**, through Telegram, a webhook, or both:
+
+- **Telegram:** create a bot with @BotFather, paste its token, message the bot, then use **Find chat**.
+- **Webhook:** an [ntfy](https://ntfy.sh) topic URL, or any endpoint that accepts JSON (`{source, key, kind, title, message}`).
+
+Settings are stored in `state/alerts.json` (`0600`). The bot token is never shown again. You are notified when a problem outlasts its grace period, and again when it clears:
+
+| Problem | Grace |
+| --- | --- |
+| A location is failed (its devices are blocked) | None |
+| Applying routing keeps failing | 90 seconds |
+| Tailscale on the gateway is not running | 3 minutes |
+| The Proton session is signed out, or the broker is unreachable | 10 minutes |
+| Proton certificate renewal is not running, or a certificate expires within 24 hours | None |
+| A device routed through a VPN stops using the gateway as its exit node: it did before, is online, and has sent no Internet traffic through the gateway for 15 minutes | 10 minutes |
+
+The gateway also sends a message whenever it starts. Current problems appear on the dashboard and under `alerts` in `GET /v1/status`.
+
+The gateway cannot report its own absence. On Proxmox, `deploy/proxmox/` has a watchdog for the host that runs every two minutes. It alerts, through the same channels, when the gateway's LXC is stopped, a container is unhealthy, or the gateway's DNS stops answering:
+
+```sh
+install -m 755 deploy/proxmox/tailway-watchdog.sh /usr/local/sbin/tailway-watchdog
+install -m 644 deploy/proxmox/tailway-watchdog.{service,timer} /etc/systemd/system/
+printf 'CTID=<gateway LXC ID>\nGATEWAY_DNS=<gateway tailnet IP>\nALERT_SETTINGS=<app directory>/state/alerts.json\n' > /etc/default/tailway-watchdog
+systemctl daemon-reload && systemctl enable --now tailway-watchdog.timer
+```
+
+## Availability and backups
+
+The gateway is a single point of failure for every device that uses it as exit node. If it goes down, those devices lose Internet access until it returns or they pick another exit node. That is the intended fail-closed behaviour. Both containers restart automatically. Routing and DNS stay closed until the first successful reconcile after a start, which retries every two seconds while Tailscale comes up.
+
+Back up:
+
+| Data | Where |
+| --- | --- |
+| The gateway's Tailscale identity | The `tailscale-state` Docker volume |
+| Routes, locations, alerts, console account, TLS, Proton session and profiles | The app directory: `.env`, `state/`, `config/`, `proton-configs/`, `proton-broker-state/`, `ui-auth/`, `tls/` |
+
+To restore, put both back and run `docker compose up -d`. Without the `tailscale-state` volume, the gateway joins the tailnet as a new device. Approve it as an exit node again and point the tailnet's DNS setting at its new address.
+
+## Running on another host
+
+To run images built elsewhere, copy `compose.yaml` and `.env`, load the images with `docker load`, set `IMAGE_TAG` in `.env`, and start with `docker compose up -d --no-build`.
+
+## Troubleshooting
+
+- **Direct connections fail, and traffic goes through Tailscale relays.** The gateway's Tailscale listens on `HOST_TAILSCALE_UDP_PORT`. It must be a free UDP port on the host, and published unchanged.
+- **The agent cannot write its runtime files.** Keep the `runtime` volume in `compose.yaml` as a tmpfs. The agent deliberately lacks the capabilities to override file ownership, so leftover files from a bind mount block it.
+- **The broker fails with `PermissionError`.** Its code is copied into the image with the broker's user and `CONTROL_GID`. Keep `CONTROL_GID` in `.env` matching the build.
+- **A location handshakes but passes no traffic.** For Proton, check the certificate and session on **Settings → Proton VPN**. For other providers, the key may have been revoked; import a new configuration.
+
+## Security model
+
+The agent runs as root only inside its own network namespace, with `NET_ADMIN`, `SETUID`, and `SETGID` plus `/dev/net/tun`. It deliberately lacks `DAC_OVERRIDE` and `FOWNER`, so host file permissions still apply to it. `SETUID` and `SETGID` are used only to start the console as UID 65532 with `CONTROL_GID`. The console keeps neither, and `no-new-privileges` prevents getting them back. There is no Docker socket, host network, `SYS_ADMIN`, `SYS_MODULE`, or privileged mode. If the console exits unexpectedly, the container stops and Compose restarts it.
+
+The API accepts only logical node, location, and route IDs. System commands are run with explicit argument lists, never through a shell. State is written to `0600` temporary files, synced, and renamed into place, with revision checks against concurrent changes.

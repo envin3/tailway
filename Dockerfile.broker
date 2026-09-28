@@ -14,6 +14,11 @@ RUN apt-get update \
     && python3 -c "import importlib.metadata as m; actual=m.version('proton-vpn-api-core'); expected='$PROTON_CORE_VERSION'; assert actual == expected, f'expected proton-vpn-api-core {expected}, got {actual}'" \
     && rm -rf /var/lib/apt/lists/* /tmp/proton-release.deb
 
+LABEL org.opencontainers.image.title="Tailway Proton broker" \
+      org.opencontainers.image.description="Proton VPN account broker for Tailway (unofficial)" \
+      org.opencontainers.image.source="https://github.com/envin3/tailway" \
+      org.opencontainers.image.licenses="GPL-3.0-or-later"
+
 COPY --chown=65533:1000 proton-broker/proton_broker /app/proton_broker
 
 ENV HOME=/var/lib/proton-broker \
