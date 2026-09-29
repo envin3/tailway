@@ -35,6 +35,7 @@ async fn main() -> Result<()> {
     let unassigned: UnassignedPolicy = environment("UNASSIGNED_POLICY", "block").parse()?;
     let dns_config = dns_config()?;
     let runner = Runner::new(dry_run);
+    let wan_interface = environment("WAN_INTERFACE", "eth0");
     let store = Arc::new(Store::new(environment(
         "STATE_PATH",
         "/var/lib/tailway/desired.json",
@@ -54,7 +55,7 @@ async fn main() -> Result<()> {
     let devices = Arc::new(Provider::new(runner.clone()));
     let reconciler = Arc::new(Reconciler::new(
         Config {
-            wan_interface: environment("WAN_INTERFACE", "eth0"),
+            wan_interface: wan_interface.clone(),
             tailscale_interface: environment("TAILSCALE_INTERFACE", "tailscale0"),
             runtime_directory: PathBuf::from(environment("RUNTIME_DIRECTORY", "/run/tailway")),
             dry_run,
@@ -64,7 +65,7 @@ async fn main() -> Result<()> {
         store.clone(),
         catalog.clone(),
         devices.clone(),
-        runner,
+        runner.clone(),
     ));
 
     reconciler
@@ -83,6 +84,7 @@ async fn main() -> Result<()> {
         tokio::spawn(server.run(resolver.clone(), dns::is_tailnet));
     }
     let mut tailscaled = if !dry_run && environment("START_TAILSCALED", "true") == "true" {
+        enable_udp_gro_forwarding(&runner, &wan_interface).await;
         Some(start_tailscaled().await?)
     } else {
         None
@@ -191,6 +193,24 @@ fn start_gateway_ui() -> Result<Child> {
     let mut command = Command::new("gateway-ui");
     command.uid(65_532).gid(control_gid).kill_on_drop(true);
     command.spawn().context("start gateway UI")
+}
+
+/// Tailscale's recommended offload setting for exit nodes: forwarded UDP is
+/// coalesced like TCP, which cuts per-packet CPU. Best effort; some drivers
+/// lack it, and it resets whenever the interface is recreated.
+async fn enable_udp_gro_forwarding(runner: &Runner, interface: &str) {
+    let arguments = [
+        "-K",
+        interface,
+        "rx-udp-gro-forwarding",
+        "on",
+        "rx-gro-list",
+        "off",
+    ];
+    match runner.run("ethtool", arguments).await {
+        Ok(_) => info!(interface, "UDP GRO forwarding enabled"),
+        Err(error) => warn!(interface, %error, "cannot enable UDP GRO forwarding"),
+    }
 }
 
 async fn start_tailscaled() -> Result<Child> {

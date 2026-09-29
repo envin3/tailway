@@ -23,6 +23,8 @@ use tracing::warn;
 use crate::domain::{Assignment, Device, Exit, NodeDns, is_builtin_route};
 use crate::policy::routable;
 
+mod cache;
+
 /// Proton's resolver, reachable only inside a Proton tunnel (its profiles name it).
 pub const PROTON_RESOLVER: Ipv4Addr = Ipv4Addr::new(10, 2, 0, 1);
 const DNS_PORT: u16 = 53;
@@ -39,7 +41,7 @@ pub struct Defaults {
     pub kill_switch: bool,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct Upstream {
     pub address: SocketAddrV4,
     /// Routing mark selecting a VPN tunnel; `None` uses the gateway's own route.
@@ -161,6 +163,7 @@ pub fn plan(input: PlanInput<'_>) -> HashMap<Ipv4Addr, Resolution> {
 pub struct Resolver {
     defaults: Defaults,
     plan: RwLock<Option<Arc<HashMap<Ipv4Addr, Resolution>>>>,
+    cache: cache::Cache,
 }
 
 impl Resolver {
@@ -168,6 +171,7 @@ impl Resolver {
         Self {
             defaults,
             plan: RwLock::new(None),
+            cache: cache::Cache::default(),
         }
     }
 
@@ -181,6 +185,7 @@ impl Resolver {
             .plan
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+        self.cache.clear();
     }
 
     pub fn replace(&self, plan: HashMap<Ipv4Addr, Resolution>) {
@@ -341,22 +346,47 @@ async fn answer(
         return error_response(query, REFUSED);
     };
     match resolver.resolve(client) {
-        Resolution::Server(upstream) => exchange(upstream, query, transport)
+        Resolution::Server(upstream) => cached_exchange(resolver, upstream, query, transport)
             .await
             .ok()
             .or_else(|| error_response(query, SERVFAIL)),
         Resolution::Blocked { .. } | Resolution::NotReady => error_response(query, SERVFAIL),
         Resolution::Tunnel {
             upstream, fallback, ..
-        } => match exchange(upstream, query, transport).await {
+        } => match cached_exchange(resolver, upstream, query, transport).await {
             Ok(response) => Some(response),
             Err(_) => match fallback {
-                Some(fallback) => exchange(fallback, query, transport).await.ok(),
+                Some(fallback) => cached_exchange(resolver, fallback, query, transport)
+                    .await
+                    .ok(),
                 None => None,
             }
             .or_else(|| error_response(query, SERVFAIL)),
         },
     }
+}
+
+/// An exchange answered from the cache when it can. The cache is scoped by
+/// upstream, so each route (tunnel or server) has its own answers.
+async fn cached_exchange(
+    resolver: &Resolver,
+    upstream: Upstream,
+    query: &[u8],
+    transport: Transport,
+) -> Result<Vec<u8>> {
+    let lookup = cache::Lookup::of(upstream, query);
+    let udp = matches!(transport, Transport::Udp);
+    if let Some(response) = lookup
+        .as_ref()
+        .and_then(|lookup| resolver.cache.get(lookup, query, udp))
+    {
+        return Ok(response);
+    }
+    let response = exchange(upstream, query, transport).await?;
+    if let Some(lookup) = lookup {
+        resolver.cache.insert(lookup, query, &response);
+    }
+    Ok(response)
 }
 
 /// One UDP exchange with the upstream timeout; used by the tunnel probes.
@@ -840,6 +870,66 @@ mod tests {
             ask_udp(without_fallback, 2).await.unwrap()[3] & 0x0f,
             SERVFAIL
         );
+    }
+
+    /// An upstream that answers every query with one A record (TTL 60) and
+    /// counts the queries it receives.
+    async fn counting_upstream() -> (SocketAddrV4, Arc<std::sync::atomic::AtomicUsize>) {
+        let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let SocketAddr::V4(address) = socket.local_addr().unwrap() else {
+            unreachable!()
+        };
+        let queries = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = queries.clone();
+        tokio::spawn(async move {
+            let mut buffer = [0_u8; 512];
+            loop {
+                let (length, peer) = socket.recv_from(&mut buffer).await.unwrap();
+                counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                // Header and question of "a." type A, without the OPT record.
+                let mut reply = buffer[..19.min(length)].to_vec();
+                reply[2] |= 0x80;
+                reply[6..12].copy_from_slice(&[0, 1, 0, 0, 0, 0]);
+                reply.extend_from_slice(&[0xc0, 12, 0, 1, 0, 1, 0, 0, 0, 60, 0, 4, 192, 0, 2, 7]);
+                socket.send_to(&reply, peer).await.unwrap();
+            }
+        });
+        (address, queries)
+    }
+
+    #[tokio::test]
+    async fn answers_repeated_lookups_from_the_cache_but_honours_the_kill_switch() {
+        let (upstream, queries) = counting_upstream().await;
+        let tunnel = Resolution::Tunnel {
+            exit_id: "exit-nl".into(),
+            upstream: Upstream {
+                address: upstream,
+                mark: None,
+            },
+            fallback: None,
+        };
+        let resolver = Arc::new(Resolver::new(DEFAULTS));
+        resolver.replace(HashMap::from([(loopback(), tunnel)]));
+        let server = DnsServer::bind("127.0.0.1:0".parse().unwrap())
+            .await
+            .unwrap();
+        let address = server.local_addr().unwrap();
+        tokio::spawn(server.run(resolver.clone(), |_| true));
+
+        let first = ask_udp(address, 1).await.unwrap();
+        let second = ask_udp(address, 2).await.unwrap();
+        assert_eq!(queries.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(&second[..2], &[0, 2]);
+        assert_eq!(first[2..], second[2..]);
+
+        // The same device's tunnel goes down: the cached answer is not used.
+        resolver.replace(HashMap::from([(
+            loopback(),
+            Resolution::Blocked {
+                exit_id: "exit-nl".into(),
+            },
+        )]));
+        assert_eq!(ask_udp(address, 3).await.unwrap()[3] & 0x0f, SERVFAIL);
     }
 
     #[tokio::test]

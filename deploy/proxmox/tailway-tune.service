@@ -1,0 +1,7 @@
+[Unit]
+Description=Tailway network tuning
+After=pve-guests.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/tailway-tune

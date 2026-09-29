@@ -28,7 +28,10 @@ services:
       - /var/run/tailscale:mode=0750,size=1m
     sysctls:
       net.ipv4.ip_forward: "1"
-      net.ipv6.conf.all.forwarding: "0"
+      # IPv6 is not routed, but forwarding lets the gateway refuse it at once
+      # (a reset or ICMP error) instead of dropping it silently, which makes
+      # clients wait before falling back to IPv4.
+      net.ipv6.conf.all.forwarding: "1"
     environment:
       CATALOG_PATH: /etc/tailway/catalog.json
       CONTROL_GID: ${CONTROL_GID:-1000}

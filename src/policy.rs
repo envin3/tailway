@@ -212,6 +212,25 @@ pub fn compile(input: Input<'_>) -> Result<Compiled> {
         "    iifname {:?} reject with icmpx type admin-prohibited\n  }}",
         input.tailscale_interface
     )?;
+    // Only IPv4 is routed. Refuse IPv6 before the route lookup, which would
+    // answer with rate-limited ICMP that some systems ignore for TCP: a reset
+    // makes clients fall back to IPv4 at once.
+    writeln!(output, "  chain refuse_ipv6 {{")?;
+    writeln!(
+        output,
+        "    type filter hook prerouting priority mangle; policy accept;"
+    )?;
+    writeln!(
+        output,
+        "    iifname {:?} meta nfproto ipv6 fib daddr type != local meta l4proto tcp reject with tcp reset",
+        input.tailscale_interface
+    )?;
+    writeln!(
+        output,
+        "    iifname {:?} meta nfproto ipv6 fib daddr type != local reject with icmpx type admin-prohibited",
+        input.tailscale_interface
+    )?;
+    writeln!(output, "  }}")?;
     writeln!(output, "  chain classify {{")?;
     writeln!(
         output,
@@ -346,6 +365,37 @@ mod tests {
         ));
         let disabled = compile_with(&[], &[], &[], UnassignedPolicy::Block);
         assert!(!disabled.ruleset.contains("dns_redirect"));
+    }
+
+    #[test]
+    fn refuses_ipv6_immediately_and_never_accepts_it() {
+        let devices = vec![device("node-a", 10), device("node-b", 11)];
+        let assignments = vec![
+            assign("node-a", "exit-ch"),
+            assign("node-b", DIRECT_ROUTE_ID),
+        ];
+        let exits = vec![exit("exit-ch", ExitStatus::Healthy)];
+        let ruleset =
+            compile_with(&exits, &devices, &assignments, UnassignedPolicy::Direct).ruleset;
+        let chain = &ruleset[ruleset.find("chain refuse_ipv6").expect("IPv6 chain")..];
+        let chain = &chain[..chain.find("\n  }").unwrap()];
+        for fragment in [
+            "type filter hook prerouting priority mangle; policy accept;",
+            "iifname \"tailscale0\" meta nfproto ipv6 fib daddr type != local meta l4proto tcp reject with tcp reset",
+            "iifname \"tailscale0\" meta nfproto ipv6 fib daddr type != local reject with icmpx type admin-prohibited",
+        ] {
+            assert!(chain.contains(fragment), "missing {fragment:?}\n{chain}");
+        }
+        // Every accept for tailnet traffic is IPv4-only (by address or by a
+        // mark that only IPv4 sources receive).
+        for line in ruleset.lines().filter(|line| {
+            line.contains("iifname \"tailscale0\"") && line.trim_end().ends_with("accept")
+        }) {
+            assert!(
+                line.contains("ip saddr") || line.contains("ct mark &"),
+                "{line}"
+            );
+        }
     }
 
     #[test]

@@ -57,6 +57,8 @@ MagicDNS keeps working: devices answer tailnet names themselves and forward only
 
 Change a device's kill switch or DNS server in its **DNS** panel on the **Devices** page. `DNS_KILL_SWITCH_DEFAULT` sets the default kill switch; `DNS_FORWARDER=false` turns the forwarder off.
 
+Answers are cached, separately for each route, so an answer fetched through one tunnel is never given to a device on another. A cached answer is kept for its TTL, at most 5 minutes (1 minute for names that don't exist), and a device whose VPN is down with the kill switch on still gets `SERVFAIL`. Queries carrying EDNS options, such as DNS cookies, are always forwarded.
+
 Only tailnet addresses (`100.64.0.0/10`) are answered. Until the gateway's Tailscale is running with the tailnet's device list, every lookup gets `SERVFAIL`, because an unknown device would otherwise be sent to the default server. After a restart this normally lasts a few seconds.
 
 If the gateway is down, devices not using the exit node keep resolving through the second nameserver. Devices using it get no DNS until it returns, because their traffic still goes to the unavailable exit node.
@@ -135,6 +137,32 @@ Back up:
 | Routes, locations, alerts, console account, TLS, Proton session and profiles | The app directory: `.env`, `state/`, `config/`, `proton-configs/`, `proton-broker-state/`, `ui-auth/`, `tls/` |
 
 To restore, put both back and run `docker compose up -d`. Without the `tailscale-state` volume, the gateway joins the tailnet as a new device. Approve it as an exit node again and point the tailnet's DNS setting at its new address.
+
+## Performance
+
+The gateway routes IPv4 only. It refuses IPv6 from devices immediately (a TCP reset, or ICMP for other protocols), so apps fall back to IPv4 without waiting. For this, `compose.yaml` turns on IPv6 forwarding in the agent's container; nothing is forwarded.
+
+At startup the agent turns on UDP GRO forwarding on its own network interface. Tailscale recommends this for exit nodes because it cuts the CPU cost per packet. For the full benefit, turn it on along the rest of the path too, and let Tailscale use large UDP socket buffers:
+
+- **Any Linux host:** `ethtool -K <uplink> rx-udp-gro-forwarding on rx-gro-list off`, for example from a `post-up` line of the interface.
+- **Proxmox, gateway in an LXC:** `deploy/proxmox/tailway-tune.sh` sets it on the host's uplink and on the LXC's interfaces, and a timer reapplies it after the container restarts. It reads `CTID` from `/etc/default/tailway-watchdog`:
+
+  ```sh
+  install -m 755 deploy/proxmox/tailway-tune.sh /usr/local/sbin/tailway-tune
+  install -m 644 deploy/proxmox/tailway-tune.{service,timer} /etc/systemd/system/
+  systemctl daemon-reload && systemctl enable --now tailway-tune.timer
+  ```
+
+- **Socket buffers:** in an unprivileged container, Tailscale cannot raise its buffers itself and logs `failed to force-set UDP read buffer size`. It then uses the kernel's defaults, which only the host can change. Buffers are allocated only while data is queued.
+
+  ```sh
+  printf 'net.core.rmem_max = 7340032\nnet.core.wmem_max = 7340032\nnet.core.rmem_default = 7340032\nnet.core.wmem_default = 7340032\n' > /etc/sysctl.d/90-tailway.conf
+  sysctl --system
+  ```
+
+  The warning remains in the log after the change; it's harmless.
+
+A single device's speed is normally limited by its VPN location, not the gateway. On a 4-core Intel N150, the Tailscale leg alone carried about 1.4 Gbit/s using about one core.
 
 ## Running on another host
 

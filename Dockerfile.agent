@@ -23,7 +23,7 @@ RUN case "$TARGETARCH" in \
         *) echo "unsupported TARGETARCH: $TARGETARCH" >&2; exit 1 ;; \
     esac \
     && apt-get update \
-    && apt-get install --no-install-recommends -y ca-certificates conntrack curl iproute2 nftables tcpdump wireguard-tools \
+    && apt-get install --no-install-recommends -y ca-certificates conntrack curl ethtool iproute2 nftables tcpdump wireguard-tools \
     && curl -fsSLo /tmp/tailscale.tgz "https://pkgs.tailscale.com/stable/tailscale_${TAILSCALE_VERSION}_${TARGETARCH}.tgz" \
     && echo "$tailscale_sha256  /tmp/tailscale.tgz" | sha256sum --check - \
     && tar -xzf /tmp/tailscale.tgz -C /tmp \
