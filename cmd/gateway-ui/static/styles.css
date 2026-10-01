@@ -432,3 +432,14 @@ input[type="file"] { padding: 7px 10px; }
 .health-name { font-weight: 600; }
 .health-message { color: var(--muted); overflow-wrap: anywhere; }
 .health-check.failed .health-message, .health-check.warning .health-message { color: var(--text); }
+
+/* 24-hour strip under each location */
+.spark { display: grid; gap: 2px; margin: -2px 0 10px 38px; }
+.spark svg { width: 100%; height: 28px; display: block; }
+.spark polyline { fill: none; stroke: var(--primary); stroke-width: 1.5; vector-effect: non-scaling-stroke; }
+.spark rect { fill: var(--border-strong); }
+.spark rect.st0 { fill: var(--bad); }
+.spark rect.st1 { fill: var(--border-strong); }
+.spark rect.st2 { fill: var(--warn); }
+.spark rect.st3 { fill: var(--good); }
+.spark small { font-size: 11px; color: var(--muted); }

@@ -21,6 +21,7 @@ use crate::domain::{
 };
 use crate::events::{self, Category, Event, EventLog, Severity};
 use crate::health::Health;
+use crate::metrics::Metrics;
 use crate::notify::{self, Notifier, Settings, Telegram, Webhook};
 use crate::proton::AccountLimits;
 use crate::reconcile::Reconciler;
@@ -37,6 +38,7 @@ pub struct Api {
     notifier: Arc<Notifier>,
     events: Option<Arc<EventLog>>,
     health: Option<Arc<Health>>,
+    metrics: Option<Arc<Metrics>>,
     /// `/healthz` fails when no reconcile pass finished for this long.
     liveness_limit: std::time::Duration,
 }
@@ -121,8 +123,15 @@ impl Api {
             notifier,
             events: None,
             health: None,
+            metrics: None,
             liveness_limit: std::time::Duration::from_secs(150),
         }
+    }
+
+    /// Serves the per-location history for the dashboard's charts.
+    pub fn with_metrics(mut self, metrics: Arc<Metrics>) -> Self {
+        self.metrics = Some(metrics);
+        self
     }
 
     /// Serves the health registry, and `/healthz` against `liveness_limit`.
@@ -161,6 +170,7 @@ impl Api {
             .route("/v1/alerts/telegram/chats", post(telegram_chats))
             .route("/v1/events", get(get_events).post(post_console_event))
             .route("/v1/health", get(get_health))
+            .route("/v1/metrics/history", get(get_history))
             .route("/healthz", get(liveness))
             .route("/readyz", get(readiness))
             .with_state(self.clone())
@@ -258,6 +268,34 @@ async fn record_changes(State(api): State<Arc<Api>>, request: Request, next: Nex
         });
     }
     response
+}
+
+/// The last day, one point per minute per location: `[minute, state,
+/// probe milliseconds or null, received bit/s, sent bit/s]`.
+async fn get_history(State(api): State<Arc<Api>>) -> Response {
+    let locations: serde_json::Map<String, Value> = api
+        .metrics
+        .as_ref()
+        .map(|metrics| metrics.history())
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(name, points)| {
+            let rows = points
+                .iter()
+                .map(|point| {
+                    json!([
+                        point.minute,
+                        point.state,
+                        point.probe_ms,
+                        point.received_bps,
+                        point.sent_bps
+                    ])
+                })
+                .collect();
+            (name, Value::Array(rows))
+        })
+        .collect();
+    Json(json!({ "locations": locations })).into_response()
 }
 
 /// Every health check, and the worst status among them.

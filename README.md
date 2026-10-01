@@ -69,6 +69,8 @@ Most settings live in the console. `.env` holds the few that apply at startup:
 | `LOG_FORMAT` | `text` | `json` for one JSON object per line, for log collectors |
 | `LOG_LEVEL` | `info` | Log detail: `debug`, `info`, `warn`, or a filter such as `tailway=debug` |
 | `TAILSCALE_LOG` | `warnings` | `verbose` to include all of Tailscale's own messages |
+| `METRICS` | `true` | Prometheus metrics at `http://<gateway tailnet IP>:METRICS_PORT/metrics`, on the tailnet only |
+| `METRICS_PORT` | `9091` | Port for Prometheus metrics |
 
 ## Proton VPN support
 

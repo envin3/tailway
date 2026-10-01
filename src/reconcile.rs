@@ -16,6 +16,7 @@ use crate::domain::{Exit, ExitStatus, UnassignedPolicy, is_builtin_route};
 use crate::events::EventLog;
 use crate::exit_watch::DeviceUse;
 use crate::history;
+use crate::metrics::{ExitSample, Metrics};
 use crate::platform::Runner;
 use crate::policy::{self, MARK_MASK};
 use crate::probe;
@@ -75,6 +76,8 @@ struct ProbeState {
     egress_failures: u32,
     resolver_failures: u32,
     public_ip: Option<Ipv4Addr>,
+    /// Round trip of the last successful probe.
+    round_trip: Option<Duration>,
 }
 
 /// Last reconcile outcome, readable without waiting for a reconcile in progress.
@@ -96,6 +99,7 @@ pub struct Reconciler {
     published: std::sync::Mutex<Published>,
     dns: Option<Arc<dns::Resolver>>,
     events: Option<Arc<EventLog>>,
+    metrics: Option<Arc<Metrics>>,
     /// When the last reconcile pass finished, successful or not (liveness).
     last_pass: std::sync::Mutex<Instant>,
 }
@@ -129,8 +133,15 @@ impl Reconciler {
             runtime: Mutex::new(Runtime::default()),
             published: std::sync::Mutex::new(Published::default()),
             events: None,
+            metrics: None,
             last_pass: std::sync::Mutex::new(Instant::now()),
         }
+    }
+
+    /// Samples every location into `metrics` on each pass.
+    pub fn with_metrics(mut self, metrics: Arc<Metrics>) -> Self {
+        self.metrics = Some(metrics);
+        self
     }
 
     /// Records location and route changes in the event history.
@@ -301,7 +312,11 @@ impl Reconciler {
     }
 
     pub async fn reconcile(&self) -> Result<()> {
+        let started = Instant::now();
         let result = self.reconcile_inner().await;
+        if let Some(metrics) = &self.metrics {
+            metrics.record_pass(started.elapsed(), result.is_err());
+        }
         *self
             .last_pass
             .lock()
@@ -377,6 +392,12 @@ impl Reconciler {
                 .and_then(|probe| probe.public_ip)
                 .map(|address| address.to_string())
                 .unwrap_or_default();
+        }
+        if let Some(metrics) = &self.metrics {
+            metrics.record_exits(
+                self.sample_exits(&runtime, &runtime_exits).await,
+                sessions_now(),
+            );
         }
         if let Some(events) = &self.events {
             for exit in &runtime_exits {
@@ -690,6 +711,48 @@ impl Reconciler {
         }
     }
 
+    /// Handshake age, traffic totals, and probe time for each location.
+    async fn sample_exits(&self, runtime: &Runtime, exits: &[Exit]) -> Vec<ExitSample> {
+        let read = |arguments: [&'static str; 3]| async move {
+            if self.config.dry_run {
+                return HashMap::new();
+            }
+            self.runner
+                .run("wg", arguments)
+                .await
+                .map(|output| per_interface(&String::from_utf8_lossy(&output)))
+                .unwrap_or_default()
+        };
+        let handshakes = read(["show", "all", "latest-handshakes"]).await;
+        let transfer = read(["show", "all", "transfer"]).await;
+        let now = sessions_now();
+        exits
+            .iter()
+            .map(|exit| {
+                let totals = transfer.get(&exit.interface);
+                ExitSample {
+                    name: exit.display_name.clone(),
+                    status: exit.status,
+                    handshake_age: handshakes
+                        .get(&exit.interface)
+                        .and_then(|values| values.first().copied())
+                        .filter(|seconds| *seconds > 0)
+                        .map(|seconds| Duration::from_secs(now.saturating_sub(seconds))),
+                    received_bytes: totals
+                        .and_then(|values| values.first().copied())
+                        .unwrap_or(0),
+                    sent_bytes: totals
+                        .and_then(|values| values.get(1).copied())
+                        .unwrap_or(0),
+                    probe: runtime
+                        .probes
+                        .get(&exit.id)
+                        .and_then(|probe| probe.round_trip),
+                }
+            })
+            .collect()
+    }
+
     /// Send traffic through every tunnel whose handshake looks fine, concurrently.
     async fn probe_tunnels(&self, runtime: &mut Runtime, exits: &[Exit], verdicts: &mut [Verdict]) {
         if self.config.dry_run {
@@ -699,14 +762,19 @@ impl Reconciler {
         for (index, (exit, verdict)) in exits.iter().zip(verdicts.iter()).enumerate() {
             if policy::routable(&verdict.status) {
                 let (mark, resolver) = (exit.mark, exit.resolver);
-                probes.spawn(async move { (index, probe::run(mark, resolver).await) });
+                probes.spawn(async move {
+                    let started = Instant::now();
+                    let outcome = probe::run(mark, resolver).await;
+                    (index, outcome, started.elapsed())
+                });
             }
         }
         while let Some(result) = probes.join_next().await {
-            let Ok((index, outcome)) = result else {
+            let Ok((index, outcome, round_trip)) = result else {
                 continue;
             };
             let state = runtime.probes.entry(exits[index].id.clone()).or_default();
+            state.round_trip = outcome.egress.is_ok().then_some(round_trip);
             let verdict = std::mem::replace(&mut verdicts[index], failed(String::new()));
             verdicts[index] = assess_probe(verdict, state, outcome);
         }
@@ -784,6 +852,25 @@ fn failed(detail: String) -> Verdict {
         rebuild: false,
         reason: "tunnel.setup",
     }
+}
+
+/// The numbers after the peer key on each line of `wg show all <field>`,
+/// by interface (one peer per interface here).
+fn per_interface(output: &str) -> HashMap<String, Vec<u64>> {
+    output
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            let interface = fields.next()?.to_owned();
+            let _peer = fields.next()?;
+            let values = fields.filter_map(|field| field.parse().ok()).collect();
+            Some((interface, values))
+        })
+        .collect()
+}
+
+fn sessions_now() -> u64 {
+    crate::sessions::now()
 }
 
 /// Bytes received, from `wg show <interface> transfer` (one peer).
@@ -1074,6 +1161,15 @@ mod tests {
                 "handshake.never"
             ]
         );
+    }
+
+    #[test]
+    fn reads_values_per_interface() {
+        let parsed = per_interface("proton0\tpeerA=\t1790713273\nproton2\tpeerB=\t0\n");
+        assert_eq!(parsed["proton0"], [1_790_713_273]);
+        assert_eq!(parsed["proton2"], [0]);
+        let transfer = per_interface("proton0\tpeerA=\t327119848\t2310\n");
+        assert_eq!(transfer["proton0"], [327_119_848, 2310]);
     }
 
     #[test]

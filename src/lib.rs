@@ -16,6 +16,7 @@ pub mod history;
 pub mod host;
 pub mod logging;
 pub mod mail;
+pub mod metrics;
 pub mod notify;
 pub mod platform;
 pub mod policy;

@@ -164,6 +164,16 @@ pub struct Resolver {
     defaults: Defaults,
     plan: RwLock<Option<Arc<HashMap<Ipv4Addr, Resolution>>>>,
     cache: cache::Cache,
+    counters: Counters,
+}
+
+/// Totals since start, for metrics.
+#[derive(Default)]
+pub struct Counters {
+    pub queries: std::sync::atomic::AtomicU64,
+    pub cache_hits: std::sync::atomic::AtomicU64,
+    /// Queries answered SERVFAIL: blocked by a kill switch, not ready, or no upstream answer.
+    pub failures: std::sync::atomic::AtomicU64,
 }
 
 impl Resolver {
@@ -172,6 +182,7 @@ impl Resolver {
             defaults,
             plan: RwLock::new(None),
             cache: cache::Cache::default(),
+            counters: Counters::default(),
         }
     }
 
@@ -193,6 +204,10 @@ impl Resolver {
             .plan
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::new(plan));
+    }
+
+    pub fn counters(&self) -> &Counters {
+        &self.counters
     }
 
     /// Whether a plan is published, so devices get answers rather than SERVFAIL.
@@ -353,6 +368,26 @@ async fn answer(
     let IpAddr::V4(client) = client else {
         return error_response(query, REFUSED);
     };
+    let count = |counter: &std::sync::atomic::AtomicU64| {
+        counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    };
+    count(&resolver.counters.queries);
+    let answer = answer_for(resolver, client, query, transport).await;
+    if answer
+        .as_ref()
+        .is_some_and(|answer| answer.len() >= 4 && answer[3] & 0x0f == SERVFAIL)
+    {
+        count(&resolver.counters.failures);
+    }
+    answer
+}
+
+async fn answer_for(
+    resolver: &Resolver,
+    client: Ipv4Addr,
+    query: &[u8],
+    transport: Transport,
+) -> Option<Vec<u8>> {
     match resolver.resolve(client) {
         Resolution::Server(upstream) => cached_exchange(resolver, upstream, query, transport)
             .await
@@ -388,6 +423,10 @@ async fn cached_exchange(
         .as_ref()
         .and_then(|lookup| resolver.cache.get(lookup, query, udp))
     {
+        resolver
+            .counters
+            .cache_hits
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         return Ok(response);
     }
     let response = exchange(upstream, query, transport).await?;
@@ -927,6 +966,17 @@ mod tests {
         let first = ask_udp(address, 1).await.unwrap();
         let second = ask_udp(address, 2).await.unwrap();
         assert_eq!(queries.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let counters = resolver.counters();
+        assert_eq!(
+            counters.queries.load(std::sync::atomic::Ordering::SeqCst),
+            2
+        );
+        assert_eq!(
+            counters
+                .cache_hits
+                .load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
         assert_eq!(&second[..2], &[0, 2]);
         assert_eq!(first[2..], second[2..]);
 

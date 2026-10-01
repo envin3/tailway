@@ -14,6 +14,10 @@ impl Runner {
         Self { dry_run }
     }
 
+    pub fn dry_run(&self) -> bool {
+        self.dry_run
+    }
+
     pub async fn run<I, S>(&self, program: &str, arguments: I) -> Result<Vec<u8>>
     where
         I: IntoIterator<Item = S>,

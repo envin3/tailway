@@ -15,6 +15,8 @@ All notable changes to Tailway are listed here. Versions follow [Semantic Versio
 - A health registry covering routing, Tailscale, the DNS forwarder, each location, VPN-routed devices, Proton, and the host (disk space, clock synchronisation, connection-tracking table). Shown in a **Health checks** card on the dashboard and at `GET /v1/health`. Low disk space and a nearly full connection table now raise alerts.
 - A reason code for each location's status (`statusReason`), including `handshake.no_reply` when a server has sent nothing back at all.
 - `GET /healthz` (liveness) and `GET /readyz` (readiness) on the control socket.
+- A 24-hour history per location (state, throughput, probe time), shown under each location on the dashboard and kept across restarts.
+- Prometheus metrics on the gateway's tailnet address (port 9091): location state, handshake age, traffic, probe time, reconcile passes, DNS queries and cache hits, health checks, and active alerts. `METRICS=false` turns them off.
 
 ### Changed
 

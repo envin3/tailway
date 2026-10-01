@@ -17,6 +17,7 @@ use tailway::events::{Category, Event, EventLog, Severity};
 use tailway::exit_watch::{self, ExitNodeWatch};
 use tailway::health::{Alert, Health, Report, Status};
 use tailway::host;
+use tailway::metrics::{self, Metrics};
 use tailway::notify::{self, Notifier, SettingsStore};
 use tailway::platform::Runner;
 use tailway::proton::AccountLimits;
@@ -63,6 +64,7 @@ async fn main() -> Result<()> {
     )));
     let (alerts, notifier) = start_alerts(events.clone())?;
     let health = Arc::new(Health::new(Some(alerts.clone())));
+    let metrics = Arc::new(Metrics::new(Some(state_directory.join("metrics.json"))));
     let devices = Arc::new(Provider::new(runner.clone()));
     let reconciler = Arc::new(
         Reconciler::new(
@@ -79,7 +81,8 @@ async fn main() -> Result<()> {
             devices.clone(),
             runner.clone(),
         )
-        .with_events(events.clone()),
+        .with_events(events.clone())
+        .with_metrics(metrics.clone()),
     );
 
     reconciler
@@ -172,6 +175,14 @@ async fn main() -> Result<()> {
         "/run/tailway/proton.sock",
     )));
     let account_task = tokio::spawn(watch_account(account_limits.clone(), health.clone()));
+    let metrics_task = tokio::spawn(save_metrics_hourly(metrics.clone()));
+    let exporter_task = start_exporter(
+        runner.clone(),
+        metrics.clone(),
+        health.clone(),
+        alerts.clone(),
+        reconciler.clone(),
+    );
     let router = Arc::new(
         Api::new(
             store,
@@ -183,8 +194,9 @@ async fn main() -> Result<()> {
             notifier,
         )
         .with_events(events.clone())
+        .with_metrics(metrics.clone())
         // Alive while reconcile passes keep completing, whatever their result.
-        .with_health(health, (interval * 5).max(LIVENESS_MIN)),
+        .with_health(health.clone(), (interval * 5).max(LIVENESS_MIN)),
     )
     .router();
     let mut gateway_ui = start_gateway_ui()?;
@@ -203,6 +215,13 @@ async fn main() -> Result<()> {
     };
     reconcile_task.abort();
     account_task.abort();
+    metrics_task.abort();
+    if let Some(task) = exporter_task {
+        task.abort();
+    }
+    if let Err(error) = metrics.save() {
+        warn!(error = %format!("{error:#}"), "cannot save the metrics history");
+    }
     let _ = gateway_ui.start_kill();
     let _ = gateway_ui.wait().await;
     if let Some(child) = tailscaled.as_mut() {
@@ -217,6 +236,96 @@ async fn main() -> Result<()> {
         format!("Gateway agent {} stopped", tailway::VERSION),
     ));
     serve_result
+}
+
+async fn save_metrics_hourly(metrics: Arc<Metrics>) {
+    loop {
+        tokio::time::sleep(Duration::from_secs(3600)).await;
+        if let Err(error) = metrics.save() {
+            warn!(error = %format!("{error:#}"), "cannot save the metrics history");
+        }
+    }
+}
+
+/// Serves Prometheus metrics on the gateway's tailnet address only
+/// (`METRICS_PORT`, default 9091; `METRICS=false` turns it off). Waits for
+/// Tailscale to have an address.
+fn start_exporter(
+    runner: Runner,
+    metrics: Arc<Metrics>,
+    health: Arc<Health>,
+    alerts: Arc<Alerts>,
+    reconciler: Arc<Reconciler>,
+) -> Option<tokio::task::JoinHandle<()>> {
+    if environment("METRICS", "true") != "true" || runner.dry_run() {
+        return None;
+    }
+    let port: u16 = match environment("METRICS_PORT", "9091").parse() {
+        Ok(port) => port,
+        Err(error) => {
+            warn!(%error, "invalid METRICS_PORT; metrics are off");
+            return None;
+        }
+    };
+    Some(tokio::spawn(async move {
+        let listener = loop {
+            let address = runner
+                .run("tailscale", ["ip", "-4"])
+                .await
+                .ok()
+                .and_then(|output| {
+                    String::from_utf8_lossy(&output)
+                        .trim()
+                        .parse::<std::net::Ipv4Addr>()
+                        .ok()
+                });
+            if let Some(address) = address {
+                match tokio::net::TcpListener::bind((address, port)).await {
+                    Ok(listener) => {
+                        info!(%address, port, "Prometheus metrics at /metrics, on the tailnet only");
+                        break listener;
+                    }
+                    Err(error) => {
+                        warn!(%error, %address, port, "cannot listen for metrics; retrying")
+                    }
+                }
+            }
+            tokio::time::sleep(Duration::from_secs(10)).await;
+        };
+        let router = axum::Router::new().route(
+            "/metrics",
+            axum::routing::get(move || {
+                let (metrics, health, alerts, reconciler) = (
+                    metrics.clone(),
+                    health.clone(),
+                    alerts.clone(),
+                    reconciler.clone(),
+                );
+                async move {
+                    let checks = health.checks();
+                    let text = metrics.prometheus(&metrics::Extra {
+                        dns: reconciler.dns().map(|resolver| resolver.counters()),
+                        checks: &checks,
+                        alerts_active: alerts
+                            .active()
+                            .iter()
+                            .filter(|alert| alert.notified)
+                            .count(),
+                    });
+                    (
+                        [(
+                            axum::http::header::CONTENT_TYPE,
+                            "text/plain; version=0.0.4",
+                        )],
+                        text,
+                    )
+                }
+            }),
+        );
+        if let Err(error) = axum::serve(listener, router).await {
+            warn!(%error, "metrics server stopped");
+        }
+    }))
 }
 
 fn start_gateway_ui() -> Result<Child> {

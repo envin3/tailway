@@ -36,6 +36,7 @@ const state = {
   picker: { country: "", features: new Set(), shown: PICKER_PAGE_DEFAULT },
   events: { filter: "all", search: "", items: [], more: false, loading: false, error: "" },
   health: null,
+  history: { locations: {}, at: 0 },
   recentEvents: [],
   lastLoaded: 0
 };
@@ -184,6 +185,11 @@ const load = async ({ force = false } = {}) => {
       revision: Math.max(status.revision || 0, exits.revision || 0),
       loadError: ""
     });
+    if (Date.now() - state.history.at > 60_000) {
+      try {
+        state.history = { ...(await api("/v1/metrics/history")), at: Date.now() };
+      } catch (_) { /* keep the previous history */ }
+    }
     try {
       [state.recentEvents, state.health] = await Promise.all([
         api("/v1/events?limit=6").then(page => page.events || []),
@@ -440,7 +446,7 @@ const renderDashboard = () => {
   $("#dashboard-locations").innerHTML = state.exits.length ? state.exits.map(exit => {
     const health = exitHealth(exit);
     const users = state.devices.filter(device => device.exitId === exit.id).length;
-    return `<div class="mini-row"><span class="flag">${flag(exit.country)}</span><span class="grow"><strong>${escapeHTML(exit.displayName)}</strong><small>${escapeHTML([countryName(exit.country), exit.city].filter(Boolean).join(" · "))}${exit.publicIp ? ` · ${escapeHTML(exit.publicIp)}` : ""} · ${users} ${users === 1 ? "device" : "devices"}</small></span><span class="badge ${health.tone}">${health.label}</span></div>`;
+    return `<div class="mini-row"><span class="flag">${flag(exit.country)}</span><span class="grow"><strong>${escapeHTML(exit.displayName)}</strong><small>${escapeHTML([countryName(exit.country), exit.city].filter(Boolean).join(" · "))}${exit.publicIp ? ` · ${escapeHTML(exit.publicIp)}` : ""} · ${users} ${users === 1 ? "device" : "devices"}</small></span><span class="badge ${health.tone}">${health.label}</span></div>${sparkline(state.history.locations?.[exit.displayName])}`;
   }).join("") : `<p class="muted">No tunnels are running. Pick a VPN location for a device to start one.</p>`;
 
   const facts = [];
@@ -454,6 +460,30 @@ const renderDashboard = () => {
   const channels = [state.alerts?.settings?.telegram && "Telegram", state.alerts?.settings?.webhook && "Webhook"].filter(Boolean);
   facts.push(["Notifications", channels.length ? channels.join(" and ") : "Off", channels.length ? "" : "warn"]);
   $("#dashboard-facts").innerHTML = facts.map(([term, value, tone]) => `<dt>${escapeHTML(term)}</dt><dd class="${tone}">${escapeHTML(value)}</dd>`).join("");
+};
+
+/* 24-hour strip: the worst state per 15 minutes, and download throughput. */
+const BUCKETS = 96;
+const rate = bps => bps >= 1e6 ? `${(bps / 1e6).toFixed(bps >= 1e8 ? 0 : 1)} Mbit/s` : `${Math.round(bps / 1e3)} kbit/s`;
+const sparkline = rows => {
+  if (!rows?.length) return "";
+  const lastMinute = Math.floor(Date.now() / 60000);
+  const buckets = Array.from({ length: BUCKETS }, () => ({ state: null, rx: 0 }));
+  for (const [minute, pointState, , received] of rows) {
+    const index = BUCKETS - 1 - Math.floor((lastMinute - minute) / 15);
+    if (index < 0 || index >= BUCKETS) continue;
+    const bucket = buckets[index];
+    bucket.state = bucket.state === null ? pointState : Math.min(bucket.state, pointState);
+    bucket.rx = Math.max(bucket.rx, received);
+  }
+  const peak = Math.max(...buckets.map(bucket => bucket.rx));
+  const states = buckets.map((bucket, index) => bucket.state === null ? "" : `<rect x="${index}" y="15" width="1" height="5" class="st${bucket.state}"/>`).join("");
+  const points = peak > 0 ? buckets.map((bucket, index) => `${index + 0.5},${(13 - 12 * bucket.rx / peak).toFixed(2)}`).join(" ") : "";
+  const probes = rows.filter(row => row[2] !== null);
+  const probe = probes.length ? ` · probe ${probes[probes.length - 1][2]} ms` : "";
+  const down = buckets.filter(bucket => bucket.state === 0).length;
+  const summary = `Last 24 h${peak ? ` · peak ${rate(peak)}` : ""}${probe}${down ? ` · down in ${down * 15} min` : ""}`;
+  return `<div class="spark"><svg viewBox="0 0 ${BUCKETS} 20" preserveAspectRatio="none" role="img" aria-label="${escapeHTML(summary)}">${states}${points ? `<polyline points="${points}"/>` : ""}</svg><small>${escapeHTML(summary)}</small></div>`;
 };
 
 const certificateFact = () => {

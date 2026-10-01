@@ -191,6 +191,12 @@ A single device's speed is normally limited by its VPN location, not the gateway
 
 To run images built elsewhere, copy `compose.yaml` and `.env`, load the images with `docker load`, set `IMAGE_TAG` in `.env`, and start with `docker compose up -d --no-build`.
 
+## Metrics
+
+The dashboard shows the last 24 hours of each location under its name: its state in 15-minute steps (green healthy, amber degraded, red down) and a line of download throughput, with the peak rate and the latest probe round trip. The history is kept in `state/metrics.json`, saved hourly and when the agent stops; `GET /v1/metrics/history` returns it, one point per minute.
+
+For Prometheus, Grafana, or similar, the agent serves the current values at `http://<gateway tailnet IP>:9091/metrics`. It listens on the tailnet address only, so any device on your tailnet can read it and nothing else can. It includes each location's state, handshake age, bytes sent and received, and probe round trip; reconcile passes, failures and duration; DNS queries, cache hits and failures; every health check's status; and the number of active alerts. `METRICS=false` turns it off, and `METRICS_PORT` changes the port. Location and check names appear as labels, so anyone who can reach it sees them.
+
 ## Activity
 
 The **Activity** page, and **Recent activity** on the dashboard, show what happened on the gateway:
