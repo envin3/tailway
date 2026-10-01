@@ -71,6 +71,11 @@
           </div>
           <ol class="event-list" id="event-list"></ol>
           <div class="actions center"><button type="button" class="secondary" id="older-events" hidden>Show older</button></div>
+          <article class="card">
+            <header class="card-header"><h2>Reporting a problem</h2></header>
+            <p class="muted">The support bundle is a JSON summary to attach to a bug report: version, settings, locations, health checks, alerts, and recent activity. Device names become <code>device-1</code>, <code>device-2</code>, …, tailnet addresses are hidden, and it contains no keys, tokens, or passwords. Read it before sharing.</p>
+            <div class="actions"><button type="button" class="secondary" id="support-bundle">Download support bundle</button></div>
+          </article>
         </section>
 
         <section class="view" data-view="devices">
@@ -232,6 +237,15 @@
         </div>
       </div>
       <footer class="sheet-footer actions end"><button type="button" class="secondary" id="import-cancel">Cancel</button><button id="import-submit">Import</button></footer>
+    </form>
+  </dialog>
+
+  <dialog id="diagnose-dialog" class="confirm diagnose" aria-labelledby="diagnose-title">
+    <form method="dialog">
+      <h2 id="diagnose-title">Diagnose</h2>
+      <p id="diagnose-conclusion" class="diagnosis" role="status"></p>
+      <ol class="event-list" id="diagnose-steps"></ol>
+      <div class="actions end"><button value="close">Close</button></div>
     </form>
   </dialog>
 

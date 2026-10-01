@@ -171,6 +171,8 @@ impl Api {
             .route("/v1/events", get(get_events).post(post_console_event))
             .route("/v1/health", get(get_health))
             .route("/v1/metrics/history", get(get_history))
+            .route("/v1/exits/{exit_id}/diagnose", post(diagnose_exit))
+            .route("/v1/support-bundle", get(support_bundle))
             .route("/healthz", get(liveness))
             .route("/readyz", get(readiness))
             .with_state(self.clone())
@@ -203,6 +205,7 @@ async fn record_changes(State(api): State<Arc<Api>>, request: Request, next: Nex
     if matches!(method, Method::GET | Method::HEAD | Method::OPTIONS)
         || path == "/v1/events"
         || path == "/v1/alerts/telegram/chats"
+        || path.ends_with("/diagnose")
     {
         return next.run(request).await;
     }
@@ -268,6 +271,113 @@ async fn record_changes(State(api): State<Arc<Api>>, request: Request, next: Nex
         });
     }
     response
+}
+
+/// Tests one running location now and explains the result.
+async fn diagnose_exit(State(api): State<Arc<Api>>, Path(exit_id): Path<String>) -> Response {
+    match api.reconciler.diagnose(&exit_id).await {
+        Ok(diagnosis) => Json(diagnosis).into_response(),
+        Err(error) => error_response(StatusCode::NOT_FOUND, format!("{error:#}")),
+    }
+}
+
+/// A redacted summary for bug reports: versions, settings, locations, health,
+/// alerts, and recent events. Device names become `device-N`, tailnet
+/// addresses are hidden, and no keys, tokens, or console users are included.
+async fn support_bundle(State(api): State<Arc<Api>>) -> Response {
+    let devices = api.devices.devices().await.unwrap_or_default();
+    let redactor =
+        crate::support::Redactor::new(devices.iter().map(|device| device.display_name.clone()));
+    let text = |value: &str| redactor.text(value);
+    let desired = api.store.load().ok();
+    let (exits, last_error) = api.reconciler.snapshot().await;
+    let mut routes: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
+    for assignment in desired.iter().flat_map(|desired| &desired.assignments) {
+        let kind = match assignment.exit_id.as_str() {
+            crate::domain::DIRECT_ROUTE_ID => "direct",
+            crate::domain::LOCAL_ROUTE_ID => "local",
+            _ => "vpn",
+        };
+        *routes.entry(kind).or_default() += 1;
+    }
+    let checks: Vec<Value> = api
+        .health
+        .as_ref()
+        .map(|health| health.checks())
+        .unwrap_or_default()
+        .into_iter()
+        .map(|check| {
+            json!({
+                "id": text(&check.id),
+                "group": check.group,
+                "status": check.status,
+                "reason": check.reason,
+                "message": text(&check.message),
+                "since": check.since,
+                "lastOk": check.last_ok,
+            })
+        })
+        .collect();
+    let events: Vec<Value> = api
+        .events
+        .as_ref()
+        .map(|events| {
+            events.query(&events::Query {
+                limit: Some(events::MAX_LIMIT),
+                ..Default::default()
+            })
+        })
+        .unwrap_or_default()
+        .into_iter()
+        .map(|event| {
+            json!({
+                "time": event.time,
+                "severity": event.severity,
+                "category": event.category,
+                "kind": event.kind,
+                "message": text(&event.message),
+            })
+        })
+        .collect();
+    let bundle = json!({
+        "tailway": crate::VERSION,
+        "generated": crate::sessions::now(),
+        "gateway": {
+            "unassignedPolicy": api.reconciler.unassigned_policy().as_str(),
+            "dryRun": api.reconciler.dry_run(),
+            "dnsForwarder": api.reconciler.dns().is_some(),
+            "tailscaleRunning": api.reconciler.tailscale_running().await,
+            "notReady": api.reconciler.not_ready().await,
+            "lastError": text(&last_error),
+        },
+        "devices": devices.len(),
+        "routes": routes,
+        "locations": exits.iter().map(|exit| json!({
+            "name": exit.display_name,
+            "country": exit.country,
+            "city": exit.city,
+            "status": exit.status,
+            "reason": exit.status_reason,
+            "detail": text(&exit.status_detail),
+            "publicIp": exit.public_ip,
+        })).collect::<Vec<_>>(),
+        "alerts": api.alerts.active().iter().map(|alert| json!({
+            "key": text(&alert.key),
+            "message": text(&alert.message),
+            "since": alert.since,
+            "notified": alert.notified,
+        })).collect::<Vec<_>>(),
+        "health": checks,
+        "events": events,
+    });
+    (
+        [(
+            axum::http::header::CONTENT_DISPOSITION,
+            "attachment; filename=\"tailway-support.json\"",
+        )],
+        Json(bundle),
+    )
+        .into_response()
 }
 
 /// The last day, one point per minute per location: `[minute, state,

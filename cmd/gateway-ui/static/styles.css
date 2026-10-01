@@ -443,3 +443,12 @@ input[type="file"] { padding: 7px 10px; }
 .spark rect.st2 { fill: var(--warn); }
 .spark rect.st3 { fill: var(--good); }
 .spark small { font-size: 11px; color: var(--muted); }
+
+/* Diagnosis */
+dialog.diagnose { width: min(560px, calc(100vw - 32px)); }
+dialog.diagnose form { display: grid; gap: 14px; }
+.diagnosis { margin: 0; padding: 12px 14px; border-radius: 10px; background: var(--surface-2); font-size: 14px; }
+.diagnosis.ok { background: var(--good-soft); }
+.diagnosis.warning { background: var(--warn-soft); }
+.diagnosis.failed { background: var(--bad-soft); }
+.event.ok .event-icon svg { fill: var(--good); }

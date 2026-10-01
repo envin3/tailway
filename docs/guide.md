@@ -218,6 +218,20 @@ Passwords, tokens, private keys, and password hashes are never written to the lo
 
 ## Troubleshooting
 
+**Diagnose a location.** On **Locations**, **Diagnose** tests a running location now:
+
+1. It checks the tunnel interface and the last handshake.
+2. It sends real traffic through the tunnel, comparing the bytes sent and received.
+3. It asks the tunnel's DNS resolver.
+4. It tries the server's address on TCP 443 outside the tunnel, to see whether the host is up.
+
+It then says what the result most likely means. For example, "the server's host is up, but nothing comes back through WireGuard" points to the provider not accepting the key, not to your gateway. `POST /v1/exits/{id}/diagnose` returns the same.
+
+**Report a bug.** **Activity → Download support bundle** (or `GET /v1/support-bundle`) saves a JSON summary: version, settings, locations, health checks, alerts, and recent activity. Device names are replaced with `device-1`, `device-2`, …, tailnet addresses are hidden, and it contains no keys, tokens, passwords, or console user names. Read it before you share it.
+
+Common problems:
+
+
 - **Direct connections fail, and traffic goes through Tailscale relays.** The gateway's Tailscale listens on `HOST_TAILSCALE_UDP_PORT`. It must be a free UDP port on the host, and published unchanged.
 - **The agent cannot write its runtime files.** Keep the `runtime` volume in `compose.yaml` as a tmpfs. The agent deliberately lacks the capabilities to override file ownership, so leftover files from a bind mount block it.
 - **The broker fails with `PermissionError`.** Its code is copied into the image with the broker's user and `CONTROL_GID`. Keep `CONTROL_GID` in `.env` matching the build.

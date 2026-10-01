@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -711,6 +711,89 @@ impl Reconciler {
         }
     }
 
+    /// Measures one location on demand (see `diagnose`). Uses the tunnel as
+    /// it is; never changes routing.
+    pub async fn diagnose(&self, exit_id: &str) -> Result<crate::diagnose::Diagnosis> {
+        let exit = self
+            .published()
+            .exits
+            .iter()
+            .find(|exit| exit.id == exit_id)
+            .cloned()
+            .with_context(|| format!("no running location {exit_id}"))?;
+        if self.config.dry_run {
+            bail!("diagnosis needs a running gateway (DRY_RUN is on)");
+        }
+        let interface = exit.interface.as_str();
+        let interface_up = self
+            .runner
+            .run("ip", ["-o", "link", "show", "dev", interface])
+            .await
+            .is_ok_and(|output| {
+                let output = String::from_utf8_lossy(&output);
+                output.contains(",UP") || output.contains("<UP")
+            });
+        let mut findings = crate::diagnose::Findings {
+            interface_up,
+            ..Default::default()
+        };
+        if interface_up {
+            let now = sessions_now();
+            findings.handshake_age = self
+                .latest_handshake(interface)
+                .await
+                .ok()
+                .flatten()
+                .map(|seconds| Duration::from_secs(now.saturating_sub(seconds)));
+            let transfer = || async {
+                self.runner
+                    .run("wg", ["show", interface, "transfer"])
+                    .await
+                    .ok()
+                    .and_then(|output| parse_transfer(&String::from_utf8_lossy(&output)))
+            };
+            let before = transfer().await;
+            let started = Instant::now();
+            let outcome = probe::run(exit.mark, exit.resolver).await;
+            findings.test_time = started.elapsed();
+            let after = transfer().await;
+            if let (Some(before), Some(after)) = (before, after) {
+                findings.received_during_test = Some(after.0.saturating_sub(before.0));
+                findings.sent_during_test = Some(after.1.saturating_sub(before.1));
+            }
+            findings.egress = Some(outcome.egress);
+            findings.resolver = exit.resolver.map(|_| outcome.resolver);
+            findings.endpoint = self
+                .runner
+                .run("wg", ["show", interface, "endpoints"])
+                .await
+                .ok()
+                .and_then(|output| {
+                    String::from_utf8_lossy(&output)
+                        .split_whitespace()
+                        .nth(1)?
+                        .parse()
+                        .ok()
+                });
+        }
+        if let Some(endpoint) = findings.endpoint {
+            // Outside the tunnel: does the server's host answer at all? A
+            // refusal counts, since it proves the host is up.
+            let address = SocketAddr::new(endpoint.ip(), 443);
+            let attempt = tokio::time::timeout(
+                Duration::from_secs(3),
+                tokio::net::TcpStream::connect(address),
+            )
+            .await;
+            findings.endpoint_answers = Some(match attempt {
+                Ok(Ok(_)) => true,
+                Ok(Err(error)) => error.kind() == std::io::ErrorKind::ConnectionRefused,
+                Err(_) => false,
+            });
+        }
+        Ok(crate::diagnose::diagnose(&exit.display_name, &findings))
+    }
+
     /// Handshake age, traffic totals, and probe time for each location.
     async fn sample_exits(&self, runtime: &Runtime, exits: &[Exit]) -> Vec<ExitSample> {
         let read = |arguments: [&'static str; 3]| async move {
@@ -867,6 +950,14 @@ fn per_interface(output: &str) -> HashMap<String, Vec<u64>> {
             Some((interface, values))
         })
         .collect()
+}
+
+/// Received and sent bytes from `wg show <interface> transfer` (one peer).
+fn parse_transfer(output: &str) -> Option<(u64, u64)> {
+    output.lines().find_map(|line| {
+        let mut fields = line.split_whitespace().skip(1);
+        Some((fields.next()?.parse().ok()?, fields.next()?.parse().ok()?))
+    })
 }
 
 fn sessions_now() -> u64 {
@@ -1161,6 +1252,12 @@ mod tests {
                 "handshake.never"
             ]
         );
+    }
+
+    #[test]
+    fn reads_transfer_totals() {
+        assert_eq!(parse_transfer("peerA=\t1024\t2048\n"), Some((1024, 2048)));
+        assert_eq!(parse_transfer(""), None);
     }
 
     #[test]

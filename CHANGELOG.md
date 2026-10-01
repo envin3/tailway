@@ -17,6 +17,8 @@ All notable changes to Tailway are listed here. Versions follow [Semantic Versio
 - `GET /healthz` (liveness) and `GET /readyz` (readiness) on the control socket.
 - A 24-hour history per location (state, throughput, probe time), shown under each location on the dashboard and kept across restarts.
 - Prometheus metrics on the gateway's tailnet address (port 9091): location state, handshake age, traffic, probe time, reconcile passes, DNS queries and cache hits, health checks, and active alerts. `METRICS=false` turns them off.
+- **Diagnose** on each running location: tests the tunnel, traffic, DNS, and whether the server's host is up, then explains the likely cause.
+- A redacted support bundle for bug reports (**Activity → Download support bundle**).
 
 ### Changed
 

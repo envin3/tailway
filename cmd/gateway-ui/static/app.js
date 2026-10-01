@@ -709,7 +709,7 @@ const renderLocations = () => {
         ${features.length ? `<div class="chips">${features.map(feature => `<span class="tag">${escapeHTML(feature)}</span>`).join("")}</div>` : ""}
         <dl class="facts">${facts.map(([term, value]) => `<dt>${escapeHTML(term)}</dt><dd>${escapeHTML(value)}</dd>`).join("")}</dl>
         ${exit?.status === "failed" || exit?.status === "degraded" ? `<p class="location-detail">${escapeHTML(exit.statusDetail || "The tunnel is not passing traffic.")}</p>` : ""}
-        ${!users.length && (exit || server.source === "custom") ? `<div class="actions">${exit ? `<button type="button" class="small secondary" data-stop-exit="${escapeHTML(exit.id)}">Stop tunnel</button>` : ""}${server.source === "custom" ? `<button type="button" class="small danger-outline" data-remove-custom="${escapeHTML(server.id)}" data-name="${escapeHTML(server.name)}">Remove</button>` : ""}</div>` : ""}
+        ${exit || server.source === "custom" ? `<div class="actions">${exit ? `<button type="button" class="small secondary" data-diagnose="${escapeHTML(exit.id)}">Diagnose</button>` : ""}${!users.length && exit ? `<button type="button" class="small secondary" data-stop-exit="${escapeHTML(exit.id)}">Stop tunnel</button>` : ""}${!users.length && server.source === "custom" ? `<button type="button" class="small danger-outline" data-remove-custom="${escapeHTML(server.id)}" data-name="${escapeHTML(server.name)}">Remove</button>` : ""}</div>` : ""}
       </article>`;
   }).join("");
 };
@@ -1075,6 +1075,20 @@ $("#event-search").addEventListener("input", event => {
   }, 250);
 });
 $("#older-events").addEventListener("click", () => loadEvents({ older: true }));
+$("#support-bundle").addEventListener("click", async event => {
+  await busy(event.currentTarget, async () => {
+    try {
+      const bundle = await api("/v1/support-bundle");
+      const url = URL.createObjectURL(new Blob([JSON.stringify(bundle, null, 2)], { type: "application/json" }));
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `tailway-support-${new Date().toISOString().slice(0, 10)}.json`;
+      link.click();
+      setTimeout(() => URL.revokeObjectURL(url), 10_000);
+      toast("Support bundle downloaded. Device names and tailnet addresses are replaced; check it before sharing.");
+    } catch (error) { toast(error.message, "bad"); }
+  });
+});
 
 $("#device-filters").addEventListener("click", event => {
   const chip = event.target.closest("[data-filter]");
@@ -1126,7 +1140,34 @@ $("#missing-devices").addEventListener("click", async event => {
 });
 
 $("#add-location").addEventListener("click", openPicker);
+const STEP_ICONS = { ok: "check", warning: "warning", failed: "error", unknown: "info" };
+const diagnose = async (button, exitId) => {
+  const dialog = $("#diagnose-dialog");
+  const exit = state.exits.find(candidate => candidate.id === exitId);
+  $("#diagnose-title").textContent = `Diagnose ${exit?.displayName || "location"}`;
+  $("#diagnose-conclusion").className = "diagnosis";
+  $("#diagnose-conclusion").textContent = "Testing: sending traffic through the tunnel and contacting the server. This takes a few seconds…";
+  $("#diagnose-steps").innerHTML = "";
+  dialog.showModal();
+  await busy(button, async () => {
+    try {
+      const result = await api(`/v1/exits/${encodeURIComponent(exitId)}/diagnose`, { method: "POST", body: "{}" });
+      $("#diagnose-conclusion").className = `diagnosis ${escapeHTML(result.status)}`;
+      $("#diagnose-conclusion").textContent = result.conclusion;
+      $("#diagnose-steps").innerHTML = result.steps.map(step => `<li class="event ${{ ok: "ok", warning: "warning", failed: "error" }[step.status] || "info"}">
+        <span class="event-icon">${icon(STEP_ICONS[step.status] || "info")}</span>
+        <div class="event-body"><p><strong>${escapeHTML(step.name)}</strong></p><p class="event-meta">${escapeHTML(step.detail)}</p></div>
+      </li>`).join("");
+    } catch (error) {
+      $("#diagnose-conclusion").className = "diagnosis failed";
+      $("#diagnose-conclusion").textContent = error.message;
+    }
+  });
+};
+
 $("#location-grid").addEventListener("click", async event => {
+  const diagnoseButton = event.target.closest("[data-diagnose]");
+  if (diagnoseButton) return diagnose(diagnoseButton, diagnoseButton.dataset.diagnose);
   if (event.target.closest("[data-open-picker]")) return openPicker();
   if (event.target.closest("[data-open-import]")) return openImport();
   const remove = event.target.closest("[data-remove-custom]");
