@@ -419,3 +419,16 @@ input[type="file"] { padding: 7px 10px; }
   .event { grid-template-columns: 22px 1fr; }
   .event time { grid-column: 2; }
 }
+
+/* Health checks */
+.health-groups { display: grid; gap: 18px; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); }
+.health-group h3 { font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 0 0 6px; }
+.health-group ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.health-check { display: grid; grid-template-columns: 10px minmax(90px, auto) 1fr; gap: 10px; align-items: baseline; font-size: 14px; }
+.health-check .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); transform: translateY(-1px); }
+.health-check.ok .dot { background: var(--good); }
+.health-check.warning .dot { background: var(--warn); }
+.health-check.failed .dot { background: var(--bad); }
+.health-name { font-weight: 600; }
+.health-message { color: var(--muted); overflow-wrap: anywhere; }
+.health-check.failed .health-message, .health-check.warning .health-message { color: var(--text); }

@@ -72,6 +72,10 @@ pub struct Exit {
     pub status: ExitStatus,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub status_detail: String,
+    /// A stable code for the status, e.g. `handshake.no_reply` or
+    /// `probe.egress` (see the guide's Health section).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub status_reason: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub public_ip: String,
     /// In-tunnel resolver from the tunnel's `DNS =` line, known at runtime.

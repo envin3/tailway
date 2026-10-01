@@ -96,6 +96,8 @@ pub struct Reconciler {
     published: std::sync::Mutex<Published>,
     dns: Option<Arc<dns::Resolver>>,
     events: Option<Arc<EventLog>>,
+    /// When the last reconcile pass finished, successful or not (liveness).
+    last_pass: std::sync::Mutex<Instant>,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -103,6 +105,8 @@ struct Verdict {
     status: ExitStatus,
     detail: String,
     rebuild: bool,
+    /// Why, as a stable code (see `Exit::status_reason`).
+    reason: &'static str,
 }
 
 impl Reconciler {
@@ -125,6 +129,7 @@ impl Reconciler {
             runtime: Mutex::new(Runtime::default()),
             published: std::sync::Mutex::new(Published::default()),
             events: None,
+            last_pass: std::sync::Mutex::new(Instant::now()),
         }
     }
 
@@ -263,8 +268,45 @@ impl Reconciler {
         (published.exits.clone(), published.last_error.clone())
     }
 
+    /// Time since the last reconcile pass finished (or since start).
+    pub fn since_last_pass(&self) -> Duration {
+        self.last_pass
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .elapsed()
+    }
+
+    /// Whether the DNS forwarder answers devices; `None` when it is off.
+    pub fn dns_ready(&self) -> Option<bool> {
+        self.dns.as_ref().map(|resolver| resolver.ready())
+    }
+
+    /// What keeps the gateway from routing; empty when it is ready.
+    pub async fn not_ready(&self) -> Vec<&'static str> {
+        let published = {
+            let published = self.published();
+            (published.tailscale_running, published.applied_revision)
+        };
+        let mut reasons = Vec::new();
+        if !published.0 {
+            reasons.push("tailscale.stopped");
+        }
+        if published.1.is_none() {
+            reasons.push("rules.not_applied");
+        }
+        if self.dns_ready() == Some(false) {
+            reasons.push("dns.not_ready");
+        }
+        reasons
+    }
+
     pub async fn reconcile(&self) -> Result<()> {
-        match self.reconcile_inner().await {
+        let result = self.reconcile_inner().await;
+        *self
+            .last_pass
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Instant::now();
+        match result {
             Ok(()) => Ok(()),
             Err(error) => {
                 self.published().last_error = error.to_string();
@@ -328,6 +370,7 @@ impl Reconciler {
             }
             wanted.status = verdict.status;
             wanted.status_detail = verdict.detail;
+            wanted.status_reason = verdict.reason.to_owned();
             wanted.public_ip = runtime
                 .probes
                 .get(&wanted.id)
@@ -570,6 +613,7 @@ impl Reconciler {
                 status: ExitStatus::Healthy,
                 detail: String::new(),
                 rebuild: false,
+                reason: "ok",
             };
         }
         let since_created = runtime
@@ -589,6 +633,7 @@ impl Reconciler {
                 status: ExitStatus::Failed,
                 detail: format!("cannot read tunnel state: {error:#}; recreating"),
                 rebuild: true,
+                reason: "tunnel.unreadable",
             },
             Ok(latest) => {
                 let now = SystemTime::now()
@@ -596,14 +641,52 @@ impl Reconciler {
                     .unwrap_or_default()
                     .as_secs();
                 let age = latest.map(|seconds| Duration::from_secs(now.saturating_sub(seconds)));
-                classify(
+                let verdict = classify(
                     age,
                     runtime
                         .created
                         .get(&exit.id)
                         .map_or(Duration::MAX, Instant::elapsed),
-                )
+                );
+                if verdict.reason == "handshake.never" {
+                    self.explain_missing_handshake(exit, verdict).await
+                } else {
+                    verdict
+                }
             }
+        }
+    }
+
+    /// A tunnel that never completed a handshake: if nothing at all came back
+    /// from the server, say so, because that points away from this gateway.
+    async fn explain_missing_handshake(&self, exit: &Exit, verdict: Verdict) -> Verdict {
+        let received = self
+            .runner
+            .run("wg", ["show", &exit.interface, "transfer"])
+            .await
+            .ok()
+            .and_then(|output| parse_received(&String::from_utf8_lossy(&output)));
+        let endpoint = self
+            .runner
+            .run("wg", ["show", &exit.interface, "endpoints"])
+            .await
+            .ok()
+            .and_then(|output| {
+                String::from_utf8_lossy(&output)
+                    .split_whitespace()
+                    .nth(1)
+                    .map(str::to_owned)
+            })
+            .unwrap_or_else(|| "its endpoint".into());
+        match received {
+            Some(0) => Verdict {
+                detail: format!(
+                    "no reply from the server at {endpoint} since the tunnel was created: it may be unreachable, or not accepting this key; recreating"
+                ),
+                reason: "handshake.no_reply",
+                ..verdict
+            },
+            _ => verdict,
         }
     }
 
@@ -699,7 +782,16 @@ fn failed(detail: String) -> Verdict {
         status: ExitStatus::Failed,
         detail,
         rebuild: false,
+        reason: "tunnel.setup",
     }
+}
+
+/// Bytes received, from `wg show <interface> transfer` (one peer).
+fn parse_received(output: &str) -> Option<u64> {
+    output
+        .lines()
+        .filter_map(|line| line.split_whitespace().nth(1)?.parse::<u64>().ok())
+        .reduce(|total, bytes| total + bytes)
 }
 
 fn assess_probe(verdict: Verdict, state: &mut ProbeState, outcome: probe::Outcome) -> Verdict {
@@ -712,7 +804,11 @@ fn assess_probe(verdict: Verdict, state: &mut ProbeState, outcome: probe::Outcom
             state.egress_failures += 1;
             let failures = state.egress_failures;
             if failures < PROBE_FAILURE_LIMIT {
-                return degrade(verdict, format!("traffic probe failed: {error}"));
+                return degrade(
+                    verdict,
+                    "probe.egress",
+                    format!("traffic probe failed: {error}"),
+                );
             }
             return Verdict {
                 status: ExitStatus::Failed,
@@ -721,6 +817,7 @@ fn assess_probe(verdict: Verdict, state: &mut ProbeState, outcome: probe::Outcom
                 ),
                 rebuild: verdict.rebuild
                     || (failures - PROBE_FAILURE_LIMIT) % PROBE_REBUILD_EVERY == 0,
+                reason: "probe.egress",
             };
         }
     }
@@ -734,19 +831,29 @@ fn assess_probe(verdict: Verdict, state: &mut ProbeState, outcome: probe::Outcom
             if state.resolver_failures < PROBE_FAILURE_LIMIT {
                 return verdict;
             }
-            degrade(verdict, format!("VPN DNS resolver not answering: {error}"))
+            degrade(
+                verdict,
+                "probe.resolver",
+                format!("VPN DNS resolver not answering: {error}"),
+            )
         }
     }
 }
 
-/// Lower a healthy verdict to degraded, keeping any existing detail.
-fn degrade(verdict: Verdict, reason: String) -> Verdict {
+/// Lower a healthy verdict to degraded, keeping any existing detail and the
+/// reason of a verdict that was already worse.
+fn degrade(verdict: Verdict, code: &'static str, reason: String) -> Verdict {
     let detail = if verdict.detail.is_empty() {
         reason
     } else {
         format!("{}; {reason}", verdict.detail)
     };
     Verdict {
+        reason: if verdict.status == ExitStatus::Healthy {
+            code
+        } else {
+            verdict.reason
+        },
         status: match verdict.status {
             ExitStatus::Healthy => ExitStatus::Degraded,
             status => status,
@@ -757,32 +864,37 @@ fn degrade(verdict: Verdict, reason: String) -> Verdict {
 }
 
 fn classify(handshake_age: Option<Duration>, since_created: Duration) -> Verdict {
-    let verdict = |status, detail: String, rebuild| Verdict {
+    let verdict = |status, reason, detail: String, rebuild| Verdict {
         status,
         detail,
         rebuild,
+        reason,
     };
     match handshake_age {
         Some(age) if age <= HEALTHY_HANDSHAKE_AGE => {
-            verdict(ExitStatus::Healthy, String::new(), false)
+            verdict(ExitStatus::Healthy, "ok", String::new(), false)
         }
         Some(age) if age <= STALE_HANDSHAKE_AGE => verdict(
             ExitStatus::Degraded,
+            "handshake.stale",
             format!("last handshake {}s ago", age.as_secs()),
             false,
         ),
         Some(age) => verdict(
             ExitStatus::Failed,
+            "handshake.lost",
             format!("no handshake for {}s; recreating", age.as_secs()),
             true,
         ),
         None if since_created <= FIRST_HANDSHAKE_GRACE => verdict(
             ExitStatus::Pending,
+            "handshake.waiting",
             "waiting for first handshake".into(),
             false,
         ),
         None => verdict(
             ExitStatus::Failed,
+            "handshake.never",
             "no handshake since the tunnel was created; recreating".into(),
             true,
         ),
@@ -946,6 +1058,42 @@ mod tests {
         let never = classify(None, secs(120));
         assert_eq!(never.status, ExitStatus::Failed);
         assert!(never.rebuild);
+        assert_eq!(
+            [
+                classify(Some(secs(30)), secs(600)).reason,
+                degraded.reason,
+                stale.reason,
+                classify(None, secs(10)).reason,
+                never.reason,
+            ],
+            [
+                "ok",
+                "handshake.stale",
+                "handshake.lost",
+                "handshake.waiting",
+                "handshake.never"
+            ]
+        );
+    }
+
+    #[test]
+    fn reads_received_bytes_and_keeps_the_worse_reason() {
+        assert_eq!(parse_received("peerkey=\t0\t2310\n"), Some(0));
+        assert_eq!(
+            parse_received("peerkey=\t225202368\t2310\n"),
+            Some(225_202_368)
+        );
+        assert_eq!(parse_received(""), None);
+        let healthy = classify(Some(Duration::from_secs(10)), Duration::from_secs(600));
+        assert_eq!(
+            degrade(healthy, "probe.egress", "x".into()).reason,
+            "probe.egress"
+        );
+        let stale = classify(Some(Duration::from_secs(240)), Duration::from_secs(600));
+        assert_eq!(
+            degrade(stale, "probe.resolver", "x".into()).reason,
+            "handshake.stale"
+        );
     }
 
     fn healthy() -> Verdict {

@@ -20,6 +20,7 @@ use crate::domain::{
     is_builtin_route,
 };
 use crate::events::{self, Category, Event, EventLog, Severity};
+use crate::health::Health;
 use crate::notify::{self, Notifier, Settings, Telegram, Webhook};
 use crate::proton::AccountLimits;
 use crate::reconcile::Reconciler;
@@ -35,6 +36,9 @@ pub struct Api {
     alerts: Arc<Alerts>,
     notifier: Arc<Notifier>,
     events: Option<Arc<EventLog>>,
+    health: Option<Arc<Health>>,
+    /// `/healthz` fails when no reconcile pass finished for this long.
+    liveness_limit: std::time::Duration,
 }
 
 /// Replaces the alert channels. A channel that is absent or `null` is turned
@@ -116,7 +120,16 @@ impl Api {
             alerts,
             notifier,
             events: None,
+            health: None,
+            liveness_limit: std::time::Duration::from_secs(150),
         }
+    }
+
+    /// Serves the health registry, and `/healthz` against `liveness_limit`.
+    pub fn with_health(mut self, health: Arc<Health>, liveness_limit: std::time::Duration) -> Self {
+        self.health = Some(health);
+        self.liveness_limit = liveness_limit;
+        self
     }
 
     /// Records settings changes in, and serves, the event history.
@@ -147,6 +160,9 @@ impl Api {
             .route("/v1/alerts/test", post(test_alerts))
             .route("/v1/alerts/telegram/chats", post(telegram_chats))
             .route("/v1/events", get(get_events).post(post_console_event))
+            .route("/v1/health", get(get_health))
+            .route("/healthz", get(liveness))
+            .route("/readyz", get(readiness))
             .with_state(self.clone())
             .layer(from_fn_with_state(self, record_changes))
             .layer(axum::extract::DefaultBodyLimit::max(1 << 20))
@@ -242,6 +258,46 @@ async fn record_changes(State(api): State<Arc<Api>>, request: Request, next: Nex
         });
     }
     response
+}
+
+/// Every health check, and the worst status among them.
+async fn get_health(State(api): State<Arc<Api>>) -> Response {
+    let Some(health) = &api.health else {
+        return Json(json!({ "status": "unknown", "checks": [] })).into_response();
+    };
+    Json(json!({ "status": health.overall(), "checks": health.checks() })).into_response()
+}
+
+/// Liveness, for the container healthcheck: the reconcile loop still runs.
+/// Its result does not matter here; a failing gateway is not fixed by a restart.
+async fn liveness(State(api): State<Arc<Api>>) -> Response {
+    let since = api.reconciler.since_last_pass();
+    let alive = since <= api.liveness_limit;
+    let status = if alive {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    };
+    (
+        status,
+        Json(json!({ "alive": alive, "lastPassSecondsAgo": since.as_secs() })),
+    )
+        .into_response()
+}
+
+/// Readiness: Tailscale up, rules applied, DNS answering.
+async fn readiness(State(api): State<Arc<Api>>) -> Response {
+    let reasons = api.reconciler.not_ready().await;
+    let status = if reasons.is_empty() {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    };
+    (
+        status,
+        Json(json!({ "ready": reasons.is_empty(), "reasons": reasons })),
+    )
+        .into_response()
 }
 
 async fn get_events(State(api): State<Arc<Api>>, Query(query): Query<events::Query>) -> Response {

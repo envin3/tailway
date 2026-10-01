@@ -12,6 +12,9 @@ All notable changes to Tailway are listed here. Versions follow [Semantic Versio
 - **Keep me signed in on this device** at sign-in: the session lasts until 30 days without a visit (at most 180 days) and survives restarts and upgrades.
 - **Sign out other browsers** on the account page, which also shows how many other browsers are signed in.
 - An event history, kept across restarts in `state/events/`: locations connecting and failing, device route changes with the reason, every settings change with who made it, sign-ins and failed sign-ins with the client address, password changes and resets, and alerts. Shown on the new **Activity** page and on the dashboard, and available at `GET /v1/events`.
+- A health registry covering routing, Tailscale, the DNS forwarder, each location, VPN-routed devices, Proton, and the host (disk space, clock synchronisation, connection-tracking table). Shown in a **Health checks** card on the dashboard and at `GET /v1/health`. Low disk space and a nearly full connection table now raise alerts.
+- A reason code for each location's status (`statusReason`), including `handshake.no_reply` when a server has sent nothing back at all.
+- `GET /healthz` (liveness) and `GET /readyz` (readiness) on the control socket.
 
 ### Changed
 
@@ -22,6 +25,7 @@ All notable changes to Tailway are listed here. Versions follow [Semantic Versio
 - Tailscale's own messages appear only when they are warnings or errors (`TAILSCALE_LOG=verbose` shows all), without their duplicate timestamps.
 - Container logs rotate at 10 MB, five files each.
 - Passwords, tokens, private keys, and password hashes print as `<redacted>` wherever they could reach a log.
+- The agent container's healthcheck uses `/healthz`, so it restarts only when the agent is stuck, not when a location is down. `compose.yaml` changed; update your copy.
 
 ## [0.1.0-alpha.1] - 2026-09-28
 

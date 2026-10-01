@@ -37,6 +37,29 @@ Every tunnel is checked on each reconcile (every 30 seconds) in two ways.
 
 One failed lookup marks the location *degraded*. Two in a row mark it *failed*: its devices are blocked, and the tunnel is recreated then and every ten failures after that. Two unanswered resolver queries in a row mark it *degraded*.
 
+**Why.** Each location's status comes with a reason code (`statusReason` in `GET /v1/exits`):
+
+| Code | Meaning |
+| --- | --- |
+| `handshake.waiting` | Just created; waiting for the first handshake |
+| `handshake.no_reply` | Nothing at all has come back from the server since the tunnel was created. The server may be unreachable, or not accepting this key (a revoked key or certificate, or an account connection limit) |
+| `handshake.never` | The server replies, but no handshake has completed |
+| `handshake.stale`, `handshake.lost` | Handshakes stopped: degraded, then failed |
+| `probe.egress` | Handshakes work but traffic doesn't pass |
+| `probe.resolver` | The tunnel's DNS resolver doesn't answer |
+| `tunnel.setup`, `tunnel.unreadable` | The tunnel could not be created or inspected; the message says why |
+
+### The health registry
+
+Besides the locations, the gateway checks itself on every reconcile: its routing rules, Tailscale, the DNS forwarder, each VPN-routed device's use of the exit node, the Proton session and certificate, and the host's free disk space (for `state/`), clock synchronisation, and connection-tracking table. The dashboard's **Health checks** card shows them all. `GET /v1/health` returns each check's status (`ok`, `unknown`, `warning`, `failed`), reason code, message, when the status last changed, and when the check was last OK.
+
+Alerts come from these checks: a failed location at once, failed routing after 90 seconds, Tailscale down after 3 minutes, a signed-out Proton session after 10 minutes, low disk space (under 200 MB) after 10 minutes, and a connection table over 80% full after 5 minutes. An unsynchronised clock shows on the dashboard without an alert.
+
+For the container runtime and monitors, the control socket also answers:
+
+- `GET /healthz`: 200 while the reconcile loop keeps completing passes (whatever their result). The container's healthcheck uses it, so only a stuck agent is restarted.
+- `GET /readyz`: 200 when Tailscale runs, the routing rules are applied, and the DNS forwarder answers; otherwise 503 with the reasons.
+
 ## DNS
 
 By default, Tailscale answers an exit-node client's DNS lookups on the exit node itself, over the exit node's normal connection. The lookups of a VPN-routed device would then leak to your Internet provider, and the gateway couldn't tell which device asked.

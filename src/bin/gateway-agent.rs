@@ -15,6 +15,8 @@ use tailway::dns::{self, DnsServer};
 use tailway::domain::{ExitStatus, UnassignedPolicy};
 use tailway::events::{Category, Event, EventLog, Severity};
 use tailway::exit_watch::{self, ExitNodeWatch};
+use tailway::health::{Alert, Health, Report, Status};
+use tailway::host;
 use tailway::notify::{self, Notifier, SettingsStore};
 use tailway::platform::Runner;
 use tailway::proton::AccountLimits;
@@ -39,10 +41,11 @@ async fn main() -> Result<()> {
     let dns_config = dns_config()?;
     let runner = Runner::new(dry_run);
     let wan_interface = environment("WAN_INTERFACE", "eth0");
-    let store = Arc::new(Store::new(environment(
-        "STATE_PATH",
-        "/var/lib/tailway/desired.json",
-    )));
+    let state_path = PathBuf::from(environment("STATE_PATH", "/var/lib/tailway/desired.json"));
+    let state_directory = state_path
+        .parent()
+        .map_or_else(|| PathBuf::from("/"), PathBuf::from);
+    let store = Arc::new(Store::new(state_path));
     let catalog = Arc::new(
         StaticCatalog::new(
             environment("CATALOG_PATH", "/etc/tailway/catalog.json"),
@@ -59,6 +62,7 @@ async fn main() -> Result<()> {
         "/var/lib/tailway/events",
     )));
     let (alerts, notifier) = start_alerts(events.clone())?;
+    let health = Arc::new(Health::new(Some(alerts.clone())));
     let devices = Arc::new(Provider::new(runner.clone()));
     let reconciler = Arc::new(
         Reconciler::new(
@@ -112,11 +116,18 @@ async fn main() -> Result<()> {
         error!(%error, "initial reconciliation failed; forwarding remains closed");
     }
     let mut exit_watch = ExitNodeWatch::default();
-    observe_health(&alerts, &reconciler, &mut exit_watch, result.is_err()).await;
+    observe_health(
+        &health,
+        &reconciler,
+        &mut exit_watch,
+        result.is_err(),
+        &state_directory,
+    )
+    .await;
 
     let interval = parse_interval(&environment("RECONCILE_INTERVAL", "30s"));
     let loop_reconciler = reconciler.clone();
-    let loop_alerts = alerts.clone();
+    let loop_health = health.clone();
     let started = std::time::Instant::now();
     let reconcile_task = tokio::spawn(async move {
         loop {
@@ -130,10 +141,11 @@ async fn main() -> Result<()> {
                 error!(%error, "reconciliation failed; forwarding remains closed");
             }
             observe_health(
-                &loop_alerts,
+                &loop_health,
                 &loop_reconciler,
                 &mut exit_watch,
                 result.is_err(),
+                &state_directory,
             )
             .await;
         }
@@ -159,7 +171,7 @@ async fn main() -> Result<()> {
         "PROTON_BROKER_SOCKET",
         "/run/tailway/proton.sock",
     )));
-    let account_task = tokio::spawn(watch_account(account_limits.clone(), alerts.clone()));
+    let account_task = tokio::spawn(watch_account(account_limits.clone(), health.clone()));
     let router = Arc::new(
         Api::new(
             store,
@@ -170,7 +182,9 @@ async fn main() -> Result<()> {
             alerts,
             notifier,
         )
-        .with_events(events.clone()),
+        .with_events(events.clone())
+        // Alive while reconcile passes keep completing, whatever their result.
+        .with_health(health, (interval * 5).max(LIVENESS_MIN)),
     )
     .router();
     let mut gateway_ui = start_gateway_ui()?;
@@ -325,56 +339,162 @@ fn start_alerts(events: Arc<EventLog>) -> Result<(Arc<Alerts>, Arc<Notifier>)> {
 }
 
 async fn observe_health(
-    alerts: &Alerts,
+    health: &Health,
     reconciler: &Reconciler,
     exit_watch: &mut ExitNodeWatch,
     reconcile_failed: bool,
+    state_directory: &std::path::Path,
 ) {
     let (exits, last_error) = reconciler.snapshot().await;
-    alerts.observe(
-        "reconcile",
-        reconcile_failed.then(|| format!("Reconciliation is failing: {last_error}")),
-        RECONCILE_ALERT_GRACE,
-    );
-    alerts.observe(
+    let check =
+        |id: &str, group, name: &str, status, reason: &str, message: String, alert| Report {
+            id: id.into(),
+            group,
+            name: name.into(),
+            status,
+            reason: reason.into(),
+            message,
+            alert,
+        };
+    health.report(if reconcile_failed {
+        check(
+            "reconcile",
+            "gateway",
+            "Routing rules",
+            Status::Failed,
+            "reconcile.failed",
+            format!("Reconciliation is failing: {last_error}"),
+            Alert::on_failure(RECONCILE_ALERT_GRACE),
+        )
+    } else {
+        check(
+            "reconcile",
+            "gateway",
+            "Routing rules",
+            Status::Ok,
+            "ok",
+            "applied".into(),
+            Alert::on_failure(RECONCILE_ALERT_GRACE),
+        )
+    });
+    let running = reconciler.tailscale_running().await;
+    health.report(check(
         "tailscale",
-        (!reconciler.tailscale_running().await).then(|| {
-            "Tailscale is not running on the gateway; exit routing and DNS are unavailable."
-                .to_owned()
-        }),
-        TAILSCALE_ALERT_GRACE,
-    );
-    let mut keys = Vec::with_capacity(exits.len());
-    for exit in &exits {
-        let key = format!("exit:{}", exit.display_name);
-        alerts.observe(
-            &key,
-            (exit.status == ExitStatus::Failed).then(|| {
-                format!(
-                    "{} ({}) failed; its devices are blocked. {}",
-                    exit.display_name, exit.server_id, exit.status_detail
-                )
-            }),
-            Duration::ZERO,
-        );
-        keys.push(key);
+        "gateway",
+        "Tailscale",
+        if running { Status::Ok } else { Status::Failed },
+        if running { "ok" } else { "tailscale.stopped" },
+        if running {
+            "running".into()
+        } else {
+            "Tailscale is not running on the gateway; exit routing and DNS are unavailable.".into()
+        },
+        Alert::on_failure(TAILSCALE_ALERT_GRACE),
+    ));
+    if let Some(ready) = reconciler.dns_ready() {
+        health.report(check(
+            "dns",
+            "gateway",
+            "DNS forwarder",
+            if ready { Status::Ok } else { Status::Failed },
+            if ready { "ok" } else { "dns.not_ready" },
+            if ready {
+                "answering for every device".into()
+            } else {
+                "answering SERVFAIL until Tailscale's device list is available".into()
+            },
+            None,
+        ));
     }
-    alerts.retain("exit:", &keys);
 
-    // A VPN-routed device that stops using the gateway as its exit node.
+    let mut locations = Vec::with_capacity(exits.len());
+    for exit in &exits {
+        let id = format!("exit:{}", exit.display_name);
+        let (status, message) = match exit.status {
+            ExitStatus::Healthy => (
+                Status::Ok,
+                if exit.public_ip.is_empty() {
+                    "connected".to_owned()
+                } else {
+                    format!("connected; public IP {}", exit.public_ip)
+                },
+            ),
+            ExitStatus::Degraded => (Status::Warning, exit.status_detail.clone()),
+            ExitStatus::Pending => (Status::Unknown, exit.status_detail.clone()),
+            ExitStatus::Failed => (
+                Status::Failed,
+                format!(
+                    "{} failed; its devices are blocked. {}",
+                    exit.display_name, exit.status_detail
+                ),
+            ),
+        };
+        let reason = if exit.status_reason.is_empty() {
+            "ok"
+        } else {
+            &exit.status_reason
+        };
+        health.report(check(
+            &id,
+            "locations",
+            &exit.display_name,
+            status,
+            reason,
+            message,
+            Alert::on_failure(Duration::ZERO),
+        ));
+        locations.push(id);
+    }
+    health.retain("locations", &locations);
+
+    // VPN-routed devices that stop using the gateway as their exit node.
     match reconciler.device_usage().await {
         Ok(devices) => {
+            let routed: Vec<String> = devices
+                .iter()
+                .filter(|device| device.route.is_some())
+                .map(exit_watch::key)
+                .collect();
             for (key, problem) in exit_watch.evaluate(&devices) {
-                alerts.observe(&key, problem, exit_watch::GRACE);
+                if !routed.contains(&key) {
+                    continue;
+                }
+                let name = key.trim_start_matches(exit_watch::KEY_PREFIX).to_owned();
+                health.report(match problem {
+                    Some(problem) => check(
+                        &key,
+                        "devices",
+                        &name,
+                        Status::Warning,
+                        "exit_node.stopped",
+                        problem,
+                        Alert::on_warning(exit_watch::GRACE),
+                    ),
+                    None => check(
+                        &key,
+                        "devices",
+                        &name,
+                        Status::Ok,
+                        "ok",
+                        "uses the gateway as its exit node".into(),
+                        Alert::on_warning(exit_watch::GRACE),
+                    ),
+                });
             }
-            let present: Vec<String> = devices.iter().map(exit_watch::key).collect();
-            alerts.retain(exit_watch::KEY_PREFIX, &present);
+            health.retain("devices", &routed);
         }
         Err(error) => warn!(%error, "cannot check which devices use the exit node"),
     }
+
+    health.report(host::disk(state_directory));
+    health.report(host::clock());
+    health.report(host::conntrack(
+        std::path::Path::new(host::CONNTRACK_COUNT),
+        std::path::Path::new(host::CONNTRACK_MAX),
+    ));
 }
 
-async fn watch_account(account_limits: Arc<AccountLimits>, alerts: Arc<Alerts>) {
+async fn watch_account(account_limits: Arc<AccountLimits>, health: Arc<Health>) {
     loop {
         let (session, certificate) = match account_limits.account().await {
             Err(error) => (
@@ -401,8 +521,37 @@ async fn watch_account(account_limits: Arc<AccountLimits>, alerts: Arc<Alerts>) 
         if let Some(problem) = &session {
             warn!(%problem, "Proton account check failed");
         }
-        alerts.observe("proton-session", session, PROTON_ALERT_GRACE);
-        alerts.observe("proton-certificate", certificate, Duration::ZERO);
+        let report = |id: &str, name: &str, problem: Option<String>, reason: &str, alert| Report {
+            id: id.into(),
+            group: "proton",
+            name: name.into(),
+            status: if problem.is_some() {
+                Status::Failed
+            } else {
+                Status::Ok
+            },
+            reason: if problem.is_some() {
+                reason.into()
+            } else {
+                "ok".into()
+            },
+            message: problem.unwrap_or_else(|| "OK".into()),
+            alert,
+        };
+        health.report(report(
+            "proton-session",
+            "Proton session",
+            session,
+            "proton.signed_out",
+            Alert::on_failure(PROTON_ALERT_GRACE),
+        ));
+        health.report(report(
+            "proton-certificate",
+            "Proton certificate",
+            certificate,
+            "proton.certificate",
+            Alert::on_failure(Duration::ZERO),
+        ));
         tokio::time::sleep(ACCOUNT_POLL_INTERVAL).await;
     }
 }
@@ -424,6 +573,7 @@ fn certificate_problem(valid_seconds: Option<i64>, background_refresh: bool) -> 
 }
 
 const STARTUP_RETRY: Duration = Duration::from_secs(2);
+const LIVENESS_MIN: Duration = Duration::from_secs(150);
 const STARTUP_FAST_RETRY_WINDOW: Duration = Duration::from_secs(120);
 
 fn dns_config() -> Result<Option<DnsConfig>> {

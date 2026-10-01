@@ -195,6 +195,14 @@ impl Resolver {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::new(plan));
     }
 
+    /// Whether a plan is published, so devices get answers rather than SERVFAIL.
+    pub fn ready(&self) -> bool {
+        self.plan
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_some()
+    }
+
     /// Clients not in the published plan (new devices) use the default server.
     pub fn resolve(&self, client: Ipv4Addr) -> Resolution {
         let plan = self

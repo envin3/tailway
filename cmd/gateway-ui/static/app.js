@@ -35,6 +35,7 @@ const state = {
   formsFilled: { alerts: false, account: false, mail: false },
   picker: { country: "", features: new Set(), shown: PICKER_PAGE_DEFAULT },
   events: { filter: "all", search: "", items: [], more: false, loading: false, error: "" },
+  health: null,
   recentEvents: [],
   lastLoaded: 0
 };
@@ -184,9 +185,13 @@ const load = async ({ force = false } = {}) => {
       loadError: ""
     });
     try {
-      state.recentEvents = (await api("/v1/events?limit=6")).events || [];
+      [state.recentEvents, state.health] = await Promise.all([
+        api("/v1/events?limit=6").then(page => page.events || []),
+        api("/v1/health")
+      ]);
     } catch (_) {
       state.recentEvents = [];
+      state.health = null;
     }
     try {
       state.proton = await api("/v1/proton/account");
@@ -250,6 +255,11 @@ const problems = () => {
     if (!alert.notified || alert.key.startsWith("exit:")) continue;
     list.push({ tone: "bad", text: alert.message, link: alert.key.startsWith("proton") ? "#/settings/proton" : "", action: "Fix" });
   }
+  // Gateway and host checks not covered above (disk space, clock, connection table, DNS).
+  for (const check of state.health?.checks || []) {
+    if (!["host", "gateway"].includes(check.group) || ["reconcile", "tailscale"].includes(check.id)) continue;
+    if (check.status === "warning" || check.status === "failed") list.push({ tone: check.status === "failed" ? "bad" : "warn", text: `${check.name}: ${check.message}` });
+  }
   if (!state.protonAvailable) list.push({ tone: "warn", text: "The Proton account service is not responding.", link: "#/settings/proton", action: "Details" });
   else if (state.proton && !protonSignedIn()) list.push({ tone: "warn", text: "Proton is signed out, so tunnel certificates cannot renew.", link: "#/settings/proton", action: "Sign in" });
   else if (protonSignedIn()) {
@@ -288,6 +298,7 @@ const render = ({ force = false } = {}) => {
   renderLocations();
   renderSettings();
   renderRecentEvents();
+  renderHealth();
 };
 
 /* ---------- activity ---------- */
@@ -342,6 +353,29 @@ const renderEvents = () => {
   const older = $("#older-events");
   older.hidden = !events.more;
   older.disabled = events.loading;
+};
+
+const HEALTH_GROUPS = [["gateway", "Gateway"], ["locations", "VPN locations"], ["devices", "Devices on a VPN"], ["proton", "Proton"], ["host", "Host"]];
+const HEALTH_LABELS = { ok: "OK", unknown: "Checking", warning: "Warning", failed: "Failed" };
+const renderHealth = () => {
+  const checks = state.health?.checks || [];
+  const overall = state.health?.status || "unknown";
+  const badge = $("#health-badge");
+  badge.textContent = checks.length ? `${checks.filter(check => check.status === "ok").length} of ${checks.length} OK` : "";
+  badge.className = `badge ${{ ok: "good", warning: "warn", failed: "bad" }[overall] || ""}`;
+  $("#health-checks").innerHTML = checks.length ? HEALTH_GROUPS.map(([group, title]) => {
+    const members = checks.filter(check => check.group === group);
+    if (!members.length) return "";
+    return `<section class="health-group"><h3>${title}</h3><ul>${members.map(check => {
+      const since = check.status === "ok" ? "" : ` · since ${relativeTime(check.since * 1000)}`;
+      return `<li class="health-check ${escapeHTML(check.status)}" title="${escapeHTML(check.reason)}">
+        <span class="dot" aria-hidden="true"></span>
+        <span class="health-name">${escapeHTML(check.name)}</span>
+        <span class="health-message">${escapeHTML(check.message)}<span class="muted">${escapeHTML(since)}</span></span>
+        <span class="sr-only">${HEALTH_LABELS[check.status] || check.status}</span>
+      </li>`;
+    }).join("")}</ul></section>`;
+  }).join("") : `<p class="muted">No checks reported yet.</p>`;
 };
 
 const renderRecentEvents = () => {

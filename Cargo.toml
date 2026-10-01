@@ -20,6 +20,7 @@ humantime = "2.3"
 lettre = { version = "0.11", default-features = false, features = ["aws-lc-rs", "builder", "hostname", "smtp-transport", "tokio1-rustls", "webpki-roots"] }
 hyper = { version = "1.6", features = ["client", "http1"] }
 hyper-util = { version = "0.1", features = ["client-legacy", "http1", "tokio"] }
+libc = "0.2"
 rand = "0.9"
 # No bundled crypto: axum-server already brings rustls with aws-lc-rs, and two
 # providers in one process leave rustls unable to choose a default.
