@@ -530,12 +530,10 @@ async fn observe_health(
             ),
             ExitStatus::Degraded => (Status::Warning, exit.status_detail.clone()),
             ExitStatus::Pending => (Status::Unknown, exit.status_detail.clone()),
+            // The check's name, and the alert's title, already name the location.
             ExitStatus::Failed => (
                 Status::Failed,
-                format!(
-                    "{} failed; its devices are blocked. {}",
-                    exit.display_name, exit.status_detail
-                ),
+                format!("Down; its devices are blocked: {}", exit.status_detail),
             ),
         };
         let reason = if exit.status_reason.is_empty() {

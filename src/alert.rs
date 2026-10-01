@@ -185,12 +185,13 @@ fn event(notification: &Notification) -> Event {
         "resolved" => (Severity::Info, Category::Health, "alert.resolved"),
         _ => (Severity::Info, Category::System, "alert.info"),
     };
-    let event = Event::new(
-        severity,
-        category,
-        kind,
-        format!("{}: {}", notification.title, notification.message),
-    );
+    // Info notifications (the agent starting) carry the whole story in the message.
+    let message = if notification.kind == "info" {
+        notification.message.clone()
+    } else {
+        format!("{}: {}", notification.title, notification.message)
+    };
+    let event = Event::new(severity, category, kind, message);
     match notification.key.split_once(':') {
         Some((_, subject)) => event.subject(subject),
         None => event,
