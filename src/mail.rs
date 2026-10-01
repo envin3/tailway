@@ -25,7 +25,7 @@ pub enum Security {
     None,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Smtp {
     pub host: String,
@@ -39,6 +39,20 @@ pub struct Smtp {
     pub password: String,
     /// Sender, e.g. `Tailway <gateway@example.com>`.
     pub from: String,
+}
+
+impl std::fmt::Debug for Smtp {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("Smtp")
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("security", &self.security)
+            .field("username", &self.username)
+            .field("password", &crate::redact::secret(&self.password))
+            .field("from", &self.from)
+            .finish()
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

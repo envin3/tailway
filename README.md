@@ -66,6 +66,9 @@ Most settings live in the console. `.env` holds the few that apply at startup:
 | `UNASSIGNED_POLICY` | `block` | What devices without a route get: `block`, `local`, or `direct` |
 | `DNS_DEFAULT_SERVER` | `9.9.9.9` | DNS server for devices not routed through a VPN |
 | `DNS_KILL_SWITCH_DEFAULT` | `true` | Block DNS while a device's VPN is down |
+| `LOG_FORMAT` | `text` | `json` for one JSON object per line, for log collectors |
+| `LOG_LEVEL` | `info` | Log detail: `debug`, `info`, `warn`, or a filter such as `tailway=debug` |
+| `TAILSCALE_LOG` | `warnings` | `verbose` to include all of Tailscale's own messages |
 
 ## Proton VPN support
 

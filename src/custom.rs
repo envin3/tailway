@@ -39,7 +39,7 @@ struct Entry {
 }
 
 /// What a person supplies when importing a configuration.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Import {
     pub name: String,
@@ -49,6 +49,19 @@ pub struct Import {
     #[serde(default)]
     pub city: String,
     pub config: String,
+}
+
+impl std::fmt::Debug for Import {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("Import")
+            .field("name", &self.name)
+            .field("provider", &self.provider)
+            .field("country", &self.country)
+            .field("city", &self.city)
+            .field("config", &crate::redact::secret(&self.config))
+            .finish()
+    }
 }
 
 pub struct CustomExits {

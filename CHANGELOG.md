@@ -17,6 +17,10 @@ All notable changes to Tailway are listed here. Versions follow [Semantic Versio
 - IPv6 from devices is refused immediately (a TCP reset) instead of being dropped silently, so apps fall back to IPv4 without delay. `compose.yaml` now turns on IPv6 forwarding in the agent's container; update your copy.
 - The agent turns on UDP GRO forwarding on its network interface at startup. The agent image now includes `ethtool`.
 - A console session without **Keep me signed in** now ends when the browser closes.
+- Logs are plain text without colour codes unless shown on a terminal. `LOG_FORMAT=json` writes JSON lines, and `LOG_LEVEL` sets the detail.
+- Tailscale's own messages appear only when they are warnings or errors (`TAILSCALE_LOG=verbose` shows all), without their duplicate timestamps.
+- Container logs rotate at 10 MB, five files each.
+- Passwords, tokens, private keys, and password hashes print as `<redacted>` wherever they could reach a log.
 
 ## [0.1.0-alpha.1] - 2026-09-28
 

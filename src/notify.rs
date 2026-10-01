@@ -53,7 +53,7 @@ pub struct Settings {
     pub webhook: Option<Webhook>,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Telegram {
     pub bot_token: String,
@@ -61,12 +61,32 @@ pub struct Telegram {
     pub chat_id: String,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Webhook {
     pub url: String,
     #[serde(default)]
     pub format: Format,
+}
+
+impl std::fmt::Debug for Telegram {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("Telegram")
+            .field("bot_token", &crate::redact::secret(&self.bot_token))
+            .field("chat_id", &self.chat_id)
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for Webhook {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("Webhook")
+            .field("url", &crate::redact::url(&self.url))
+            .field("format", &self.format)
+            .finish()
+    }
 }
 
 impl Settings {

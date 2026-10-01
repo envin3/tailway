@@ -26,7 +26,7 @@ pub const BCRYPT_COST: u32 = 12;
 const ACCOUNT_FILE: &str = "account.json";
 const LEGACY_HASH_FILE: &str = "password.bcrypt";
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Account {
     pub username: String,
@@ -37,6 +37,18 @@ pub struct Account {
     /// Where and how password reset codes are emailed; `None` disables recovery.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recovery: Option<EmailRecovery>,
+}
+
+impl std::fmt::Debug for Account {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("Account")
+            .field("username", &self.username)
+            .field("password_hash", &crate::redact::secret(&self.password_hash))
+            .field("password_changed_at", &self.password_changed_at)
+            .field("recovery", &self.recovery)
+            .finish()
+    }
 }
 
 impl Account {

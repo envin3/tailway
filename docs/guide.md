@@ -168,6 +168,12 @@ A single device's speed is normally limited by its VPN location, not the gateway
 
 To run images built elsewhere, copy `compose.yaml` and `.env`, load the images with `docker load`, set `IMAGE_TAG` in `.env`, and start with `docker compose up -d --no-build`.
 
+## Logs
+
+`docker compose logs gateway-agent` shows the agent, the console, and Tailscale. Tailscale's routine messages are hidden unless `TAILSCALE_LOG=verbose`; its warnings and errors always show. `LOG_LEVEL=debug` adds detail, and `LOG_FORMAT=json` writes one JSON object per line for collectors such as Loki or journald. Logs rotate at 10 MB, five files per container, and are lost when a container is replaced.
+
+Passwords, tokens, private keys, and password hashes are never written to the log: the types that hold them print `<redacted>`, and a test fails if one stops doing so.
+
 ## Troubleshooting
 
 - **Direct connections fail, and traffic goes through Tailscale relays.** The gateway's Tailscale listens on `HOST_TAILSCALE_UDP_PORT`. It must be a free UDP port on the host, and published unchanged.

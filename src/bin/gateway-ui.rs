@@ -153,7 +153,7 @@ struct PendingCode {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt().with_target(false).init();
+    tailway::logging::init();
     let arguments: Vec<String> = env::args().skip(1).collect();
     if arguments.first().map(String::as_str) == Some("--version") {
         println!("tailway {}", tailway::VERSION);

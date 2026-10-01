@@ -24,13 +24,26 @@ const WG_QUICK_ONLY: [&str; 9] = [
     "FwMark",
 ];
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Eq, PartialEq)]
 pub struct Config {
     pub addresses: Vec<(Ipv4Addr, u8)>,
     /// IPv4 resolvers from `DNS =`, reached through the tunnel.
     pub dns: Vec<Ipv4Addr>,
     pub set_conf: String,
     peers: Vec<Peer>,
+}
+
+/// `set_conf` holds the private key.
+impl std::fmt::Debug for Config {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("Config")
+            .field("addresses", &self.addresses)
+            .field("dns", &self.dns)
+            .field("set_conf", &crate::redact::secret(&self.set_conf))
+            .field("peers", &self.peers)
+            .finish()
+    }
 }
 
 #[derive(Debug, Default, Eq, PartialEq)]

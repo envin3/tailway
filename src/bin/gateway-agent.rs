@@ -2,6 +2,7 @@ use std::env;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
+use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -19,6 +20,7 @@ use tailway::proton::AccountLimits;
 use tailway::reconcile::{Config, DnsConfig, Reconciler};
 use tailway::state::Store;
 use tailway::tailscale::Provider;
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::net::UnixListener;
 use tokio::process::{Child, Command};
 use tokio::sync::mpsc;
@@ -30,7 +32,7 @@ async fn main() -> Result<()> {
         println!("tailway {}", tailway::VERSION);
         return Ok(());
     }
-    tracing_subscriber::fmt().with_target(false).init();
+    tailway::logging::init();
     let dry_run = environment("DRY_RUN", "false").parse().unwrap_or(false);
     let unassigned: UnassignedPolicy = environment("UNASSIGNED_POLICY", "block").parse()?;
     let dns_config = dns_config()?;
@@ -226,13 +228,31 @@ async fn start_tailscaled() -> Result<Child> {
     let port: u16 = environment("TAILSCALE_PORT", "41641")
         .parse()
         .context("parse TAILSCALE_PORT")?;
-    Command::new("tailscaled")
+    let mut child = Command::new("tailscaled")
         .arg(format!("--state={}", state_path.display()))
         .arg("--socket=/var/run/tailscale/tailscaled.sock")
         .arg("--tun=tailscale0")
         .arg(format!("--port={port}"))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .spawn()
-        .context("start tailscaled")
+        .context("start tailscaled")?;
+    // tailscaled's output goes through our log, filtered (see `logging`).
+    let verbose = environment("TAILSCALE_LOG", "warnings") == "verbose";
+    if let Some(stdout) = child.stdout.take() {
+        tokio::spawn(forward_lines(stdout, verbose));
+    }
+    if let Some(stderr) = child.stderr.take() {
+        tokio::spawn(forward_lines(stderr, verbose));
+    }
+    Ok(child)
+}
+
+async fn forward_lines(output: impl tokio::io::AsyncRead + Unpin, verbose: bool) {
+    let mut lines = BufReader::new(output).lines();
+    while let Ok(Some(line)) = lines.next_line().await {
+        tailway::logging::log_tailscaled(&line, verbose);
+    }
 }
 
 async fn shutdown_signal() {
