@@ -4,6 +4,12 @@ All notable changes to Tailway are listed here. Versions follow [Semantic Versio
 
 ## [Unreleased]
 
+## [0.1.0-alpha.2] - 2026-10-01
+
+Visibility and speed: an activity history, health checks, metrics, on-demand diagnosis, faster DNS and IPv6 fallback, and a console that can remember you.
+
+**Upgrading:** replace your `compose.yaml` with the new one (IPv6 forwarding, the healthcheck, and the new settings), then `docker compose up -d --build`. Everyone is signed out of the console once.
+
 ### Added
 
 - A DNS answer cache in the forwarder, kept separately for each route; repeated lookups are answered in about a millisecond.
@@ -49,5 +55,6 @@ First alpha release.
 - A console account with sign-up on first run, password changes, and password recovery by email or on the server.
 - `--version` on both binaries and `version` in `GET /v1/status`.
 
-[Unreleased]: https://github.com/envin3/tailway/compare/v0.1.0-alpha.1...HEAD
+[Unreleased]: https://github.com/envin3/tailway/compare/v0.1.0-alpha.2...HEAD
+[0.1.0-alpha.2]: https://github.com/envin3/tailway/releases/tag/v0.1.0-alpha.2
 [0.1.0-alpha.1]: https://github.com/envin3/tailway/releases/tag/v0.1.0-alpha.1
