@@ -44,7 +44,7 @@ impl std::str::FromStr for UnassignedPolicy {
     }
 }
 
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ExitStatus {
     #[default]
@@ -79,7 +79,7 @@ pub struct Exit {
     pub resolver: Option<Ipv4Addr>,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Device {
     pub node_id: String,

@@ -6,7 +6,9 @@ const POLICY_LABELS = { block: "Blocked", local: "Local network only", direct: "
 const REFRESH_MS = 15000;
 const PROTON_SERVERS_TTL_MS = 5 * 60 * 1000;
 const SMTP_PORTS = { starttls: 587, tls: 465, none: 25 };
-const VIEWS = { dashboard: "Dashboard", devices: "Devices", locations: "Locations", settings: "Settings" };
+const VIEWS = { dashboard: "Dashboard", devices: "Devices", locations: "Locations", activity: "Activity", settings: "Settings" };
+const EVENT_FILTERS = [["all", "All", {}], ["problems", "Problems", { severity: "warning" }], ["health", "Locations & routes", { category: "health" }], ["change", "Changes", { category: "change" }], ["access", "Sign-ins", { category: "access" }], ["system", "System", { category: "system" }]];
+const EVENT_PAGE = 50;
 const TABS = ["proton", "notifications", "account"];
 
 const PICKER_PAGE_DEFAULT = 50;
@@ -32,6 +34,8 @@ const state = {
   busyDevices: new Set(),
   formsFilled: { alerts: false, account: false, mail: false },
   picker: { country: "", features: new Set(), shown: PICKER_PAGE_DEFAULT },
+  events: { filter: "all", search: "", items: [], more: false, loading: false, error: "" },
+  recentEvents: [],
   lastLoaded: 0
 };
 
@@ -180,6 +184,11 @@ const load = async ({ force = false } = {}) => {
       loadError: ""
     });
     try {
+      state.recentEvents = (await api("/v1/events?limit=6")).events || [];
+    } catch (_) {
+      state.recentEvents = [];
+    }
+    try {
       state.proton = await api("/v1/proton/account");
       state.protonAvailable = true;
     } catch (_) {
@@ -278,6 +287,67 @@ const render = ({ force = false } = {}) => {
   renderDevices({ force });
   renderLocations();
   renderSettings();
+  renderRecentEvents();
+};
+
+/* ---------- activity ---------- */
+
+const eventQuery = ({ before } = {}) => {
+  const [, , filter] = EVENT_FILTERS.find(([key]) => key === state.events.filter) || EVENT_FILTERS[0];
+  const params = new URLSearchParams({ limit: String(EVENT_PAGE), ...filter });
+  if (state.events.search) params.set("search", state.events.search);
+  if (before) params.set("before", String(before));
+  return `/v1/events?${params}`;
+};
+
+const loadEvents = async ({ older = false } = {}) => {
+  const events = state.events;
+  const before = older && events.items.length ? events.items[events.items.length - 1].time : undefined;
+  events.loading = true;
+  renderEvents();
+  try {
+    const page = (await api(eventQuery({ before }))).events || [];
+    events.items = older ? [...events.items, ...page] : page;
+    events.more = page.length === EVENT_PAGE;
+    events.error = "";
+  } catch (error) {
+    events.error = error.message;
+  }
+  events.loading = false;
+  renderEvents();
+};
+
+const EVENT_ICONS = { info: "info", warning: "warning", error: "error" };
+const eventHTML = event => {
+  const when = new Date(event.time * 1000);
+  const who = [event.actor, event.client].filter(Boolean).join(" · ");
+  return `<li class="event ${escapeHTML(event.severity)}">
+    <span class="event-icon">${icon(EVENT_ICONS[event.severity] || "info")}</span>
+    <div class="event-body">
+      <p>${escapeHTML(event.message)}</p>
+      ${who ? `<p class="event-meta">${escapeHTML(who)}</p>` : ""}
+    </div>
+    <time datetime="${when.toISOString()}" title="${escapeHTML(when.toLocaleString(LOCALE))}">${escapeHTML(relativeTime(when))}</time>
+  </li>`;
+};
+
+const renderEvents = () => {
+  const events = state.events;
+  $("#event-filters").innerHTML = EVENT_FILTERS.map(([key, label]) =>
+    `<button type="button" class="chip" data-filter="${key}" aria-pressed="${events.filter === key}">${label}</button>`).join("");
+  const list = $("#event-list");
+  if (events.error) list.innerHTML = `<li class="empty">${escapeHTML(events.error)}</li>`;
+  else if (!events.items.length) list.innerHTML = `<li class="empty">${events.loading ? "Loading…" : "Nothing recorded yet."}</li>`;
+  else list.innerHTML = events.items.map(eventHTML).join("");
+  const older = $("#older-events");
+  older.hidden = !events.more;
+  older.disabled = events.loading;
+};
+
+const renderRecentEvents = () => {
+  $("#dashboard-events").innerHTML = state.recentEvents.length
+    ? state.recentEvents.map(eventHTML).join("")
+    : `<li class="empty">Nothing recorded yet.</li>`;
 };
 
 const renderChrome = () => {
@@ -838,6 +908,7 @@ const route = () => {
   document.title = `${VIEWS[state.view]} · Tailway`;
   closeMenu();
   render({ force: true });
+  if (state.view === "activity") loadEvents();
   window.scrollTo(0, 0);
 };
 
@@ -925,6 +996,22 @@ $("#sign-out").addEventListener("click", async () => {
 });
 
 $("#device-search").addEventListener("input", () => renderDevices({ force: true }));
+$("#event-filters").addEventListener("click", event => {
+  const chip = event.target.closest("[data-filter]");
+  if (!chip) return;
+  state.events.filter = chip.dataset.filter;
+  loadEvents();
+});
+let eventSearchTimer = 0;
+$("#event-search").addEventListener("input", event => {
+  clearTimeout(eventSearchTimer);
+  eventSearchTimer = setTimeout(() => {
+    state.events.search = event.target.value.trim();
+    loadEvents();
+  }, 250);
+});
+$("#older-events").addEventListener("click", () => loadEvents({ older: true }));
+
 $("#device-filters").addEventListener("click", event => {
   const chip = event.target.closest("[data-filter]");
   if (!chip) return;

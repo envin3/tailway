@@ -13,6 +13,7 @@ use tailway::control::Api;
 use tailway::custom::CustomExits;
 use tailway::dns::{self, DnsServer};
 use tailway::domain::{ExitStatus, UnassignedPolicy};
+use tailway::events::{Category, Event, EventLog, Severity};
 use tailway::exit_watch::{self, ExitNodeWatch};
 use tailway::notify::{self, Notifier, SettingsStore};
 use tailway::platform::Runner;
@@ -53,22 +54,29 @@ async fn main() -> Result<()> {
             "/var/lib/tailway/custom-exits",
         ))),
     );
-    let (alerts, notifier) = start_alerts()?;
+    let events = Arc::new(EventLog::new(environment(
+        "EVENTS_DIRECTORY",
+        "/var/lib/tailway/events",
+    )));
+    let (alerts, notifier) = start_alerts(events.clone())?;
     let devices = Arc::new(Provider::new(runner.clone()));
-    let reconciler = Arc::new(Reconciler::new(
-        Config {
-            wan_interface: wan_interface.clone(),
-            tailscale_interface: environment("TAILSCALE_INTERFACE", "tailscale0"),
-            runtime_directory: PathBuf::from(environment("RUNTIME_DIRECTORY", "/run/tailway")),
-            dry_run,
-            unassigned,
-            dns: dns_config,
-        },
-        store.clone(),
-        catalog.clone(),
-        devices.clone(),
-        runner.clone(),
-    ));
+    let reconciler = Arc::new(
+        Reconciler::new(
+            Config {
+                wan_interface: wan_interface.clone(),
+                tailscale_interface: environment("TAILSCALE_INTERFACE", "tailscale0"),
+                runtime_directory: PathBuf::from(environment("RUNTIME_DIRECTORY", "/run/tailway")),
+                dry_run,
+                unassigned,
+                dns: dns_config,
+            },
+            store.clone(),
+            catalog.clone(),
+            devices.clone(),
+            runner.clone(),
+        )
+        .with_events(events.clone()),
+    );
 
     reconciler
         .install_baseline()
@@ -152,14 +160,17 @@ async fn main() -> Result<()> {
         "/run/tailway/proton.sock",
     )));
     let account_task = tokio::spawn(watch_account(account_limits.clone(), alerts.clone()));
-    let router = Api::new(
-        store,
-        catalog,
-        devices,
-        reconciler,
-        account_limits,
-        alerts,
-        notifier,
+    let router = Arc::new(
+        Api::new(
+            store,
+            catalog,
+            devices,
+            reconciler,
+            account_limits,
+            alerts,
+            notifier,
+        )
+        .with_events(events.clone()),
     )
     .router();
     let mut gateway_ui = start_gateway_ui()?;
@@ -185,6 +196,12 @@ async fn main() -> Result<()> {
         let _ = child.wait().await;
     }
     let _ = fs::remove_file(socket_path);
+    events.record(Event::new(
+        Severity::Info,
+        Category::System,
+        "agent.stopped",
+        format!("Gateway agent {} stopped", tailway::VERSION),
+    ));
     serve_result
 }
 
@@ -285,7 +302,7 @@ const ACCOUNT_POLL_INTERVAL: Duration = Duration::from_secs(300);
 /// close to expiry means renewal is failing.
 const CERTIFICATE_ALERT_SECONDS: i64 = 24 * 3600;
 
-fn start_alerts() -> Result<(Arc<Alerts>, Arc<Notifier>)> {
+fn start_alerts(events: Arc<EventLog>) -> Result<(Arc<Alerts>, Arc<Notifier>)> {
     let settings = Arc::new(SettingsStore::open(
         environment("ALERT_SETTINGS_PATH", "/var/lib/tailway/alerts.json"),
         notify::seed_from_environment()?,
@@ -301,7 +318,10 @@ fn start_alerts() -> Result<(Arc<Alerts>, Arc<Notifier>)> {
         ?channels,
         "alert notifications ready; configure channels on the console's Alerts page"
     );
-    Ok((Arc::new(Alerts::new(Some(sender))), notifier))
+    Ok((
+        Arc::new(Alerts::new(Some(sender)).with_events(events)),
+        notifier,
+    ))
 }
 
 async fn observe_health(

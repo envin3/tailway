@@ -8,12 +8,14 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result, bail};
 use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
-use tracing::{info, warn};
+use tracing::{debug, warn};
 
 use crate::catalog::StaticCatalog;
 use crate::dns;
 use crate::domain::{Exit, ExitStatus, UnassignedPolicy, is_builtin_route};
+use crate::events::EventLog;
 use crate::exit_watch::DeviceUse;
+use crate::history;
 use crate::platform::Runner;
 use crate::policy::{self, MARK_MASK};
 use crate::probe;
@@ -64,6 +66,8 @@ struct Runtime {
     unknown_nodes: Vec<String>,
     applied_revision: Option<u64>,
     probes: HashMap<String, ProbeState>,
+    /// Each location's last state in the event history.
+    recorded: HashMap<String, history::Recorded>,
 }
 
 #[derive(Default)]
@@ -91,6 +95,7 @@ pub struct Reconciler {
     runtime: Mutex<Runtime>,
     published: std::sync::Mutex<Published>,
     dns: Option<Arc<dns::Resolver>>,
+    events: Option<Arc<EventLog>>,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -119,7 +124,14 @@ impl Reconciler {
             runner,
             runtime: Mutex::new(Runtime::default()),
             published: std::sync::Mutex::new(Published::default()),
+            events: None,
         }
+    }
+
+    /// Records location and route changes in the event history.
+    pub fn with_events(mut self, events: Arc<EventLog>) -> Self {
+        self.events = Some(events);
+        self
     }
 
     pub fn dry_run(&self) -> bool {
@@ -312,7 +324,7 @@ impl Reconciler {
                 runtime.tunnels.remove(&wanted.id);
             }
             if verdict.status != ExitStatus::Healthy {
-                warn!(exit = %wanted.id, status = ?verdict.status, detail = %verdict.detail, "exit not healthy");
+                debug!(exit = %wanted.id, status = ?verdict.status, detail = %verdict.detail, "exit not healthy");
             }
             wanted.status = verdict.status;
             wanted.status_detail = verdict.detail;
@@ -322,6 +334,25 @@ impl Reconciler {
                 .and_then(|probe| probe.public_ip)
                 .map(|address| address.to_string())
                 .unwrap_or_default();
+        }
+        if let Some(events) = &self.events {
+            for exit in &runtime_exits {
+                let (event, remember) =
+                    history::location_event(runtime.recorded.get(&exit.id), exit);
+                if let Some(event) = event {
+                    events.record(event);
+                }
+                if remember {
+                    runtime.recorded.insert(
+                        exit.id.clone(),
+                        history::Recorded {
+                            status: exit.status,
+                            public_ip: exit.public_ip.clone(),
+                        },
+                    );
+                }
+            }
+            runtime.recorded.retain(|id, _| desired_ids.contains(id));
         }
         let compiled = policy::compile(policy::Input {
             wan_interface: &self.config.wan_interface,
@@ -345,6 +376,20 @@ impl Reconciler {
         if let Err(error) = self.apply_usage_table().await {
             // Observation only: never let it fail routing.
             warn!(%error, "cannot install the exit node usage table");
+        }
+        // The first rules after a start are not changes.
+        if let Some(events) = &self.events
+            && runtime.applied_revision.is_some()
+        {
+            for event in history::route_events(
+                &runtime.applied_routes,
+                &compiled.routes,
+                &devices,
+                &runtime_exits,
+                &desired.assignments,
+            ) {
+                events.record(event);
+            }
         }
         self.reset_moved_connections(&runtime.applied_routes, &compiled.routes)
             .await;
@@ -601,7 +646,7 @@ impl Reconciler {
                 .runner
                 .run("conntrack", ["-D", "-f", "ipv4", "-s", &source])
                 .await;
-            info!(address = %source, route = current.get(&address).map_or("removed", String::as_str), "route changed; reset tracked connections");
+            debug!(address = %source, route = current.get(&address).map_or("removed", String::as_str), "route changed; reset tracked connections");
         }
     }
 

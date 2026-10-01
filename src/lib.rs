@@ -3,12 +3,15 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub mod account;
 pub mod alert;
+pub mod audit;
 pub mod catalog;
 pub mod control;
 pub mod custom;
 pub mod dns;
 pub mod domain;
+pub mod events;
 pub mod exit_watch;
+pub mod history;
 pub mod logging;
 pub mod mail;
 pub mod notify;

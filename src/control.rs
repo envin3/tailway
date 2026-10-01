@@ -1,8 +1,9 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use axum::extract::{Path, State};
-use axum::http::StatusCode;
+use axum::extract::{Path, Query, Request, State};
+use axum::http::{Method, StatusCode};
+use axum::middleware::{Next, from_fn_with_state};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
@@ -11,12 +12,14 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::alert::{Alerts, Notification};
+use crate::audit::{self, ACTOR_HEADER, CLIENT_HEADER};
 use crate::catalog::StaticCatalog;
 use crate::dns;
 use crate::domain::{
     Assignment, DesiredState, Exit, ExitStatus, NodeDns, SCHEMA_VERSION, Server, ServerSource,
     is_builtin_route,
 };
+use crate::events::{self, Category, Event, EventLog, Severity};
 use crate::notify::{self, Notifier, Settings, Telegram, Webhook};
 use crate::proton::AccountLimits;
 use crate::reconcile::Reconciler;
@@ -31,6 +34,7 @@ pub struct Api {
     account_limits: Arc<AccountLimits>,
     alerts: Arc<Alerts>,
     notifier: Arc<Notifier>,
+    events: Option<Arc<EventLog>>,
 }
 
 /// Replaces the alert channels. A channel that is absent or `null` is turned
@@ -102,8 +106,8 @@ impl Api {
         account_limits: Arc<AccountLimits>,
         alerts: Arc<Alerts>,
         notifier: Arc<Notifier>,
-    ) -> Arc<Self> {
-        Arc::new(Self {
+    ) -> Self {
+        Self {
             store,
             catalog,
             devices,
@@ -111,7 +115,14 @@ impl Api {
             account_limits,
             alerts,
             notifier,
-        })
+            events: None,
+        }
+    }
+
+    /// Records settings changes in, and serves, the event history.
+    pub fn with_events(mut self, events: Arc<EventLog>) -> Self {
+        self.events = Some(events);
+        self
     }
 
     pub fn router(self: Arc<Self>) -> Router {
@@ -135,9 +146,153 @@ impl Api {
             .route("/v1/alerts", get(get_alerts).put(put_alerts))
             .route("/v1/alerts/test", post(test_alerts))
             .route("/v1/alerts/telegram/chats", post(telegram_chats))
-            .with_state(self)
+            .route("/v1/events", get(get_events).post(post_console_event))
+            .with_state(self.clone())
+            .layer(from_fn_with_state(self, record_changes))
             .layer(axum::extract::DefaultBodyLimit::max(1 << 20))
     }
+
+    /// What `record_changes` compares before and after a request.
+    fn snapshot(&self) -> audit::Snapshot {
+        audit::Snapshot {
+            desired: self.store.load().ok(),
+            imported: self
+                .catalog
+                .custom()
+                .and_then(|custom| custom.list().ok())
+                .unwrap_or_default(),
+        }
+    }
+}
+
+/// Records every settings change in the event history: what changed (by
+/// comparing the state before and after), who asked, and from where.
+async fn record_changes(State(api): State<Arc<Api>>, request: Request, next: Next) -> Response {
+    let method = request.method().clone();
+    let path = request.uri().path().to_owned();
+    let Some(events) = api.events.clone() else {
+        return next.run(request).await;
+    };
+    // Reads, and requests that change nothing, are not recorded.
+    if matches!(method, Method::GET | Method::HEAD | Method::OPTIONS)
+        || path == "/v1/events"
+        || path == "/v1/alerts/telegram/chats"
+    {
+        return next.run(request).await;
+    }
+    let (actor, client) = {
+        let header = |name: &str| {
+            request
+                .headers()
+                .get(name)
+                .and_then(|value| value.to_str().ok())
+                .map(|value| value.chars().take(128).collect::<String>())
+                .filter(|value| !value.is_empty())
+        };
+        (header(ACTOR_HEADER), header(CLIENT_HEADER))
+    };
+    let before = api.snapshot();
+    let response = next.run(request).await;
+    let status = response.status();
+    if !status.is_success() {
+        events.record(
+            Event::new(
+                Severity::Warning,
+                Category::Change,
+                "settings.rejected",
+                format!(
+                    "Could not {} (HTTP {})",
+                    audit::attempted(method.as_str(), &path),
+                    status.as_u16()
+                ),
+            )
+            .by(actor, client),
+        );
+        return response;
+    }
+    let after = api.snapshot();
+    let names: HashMap<String, String> = api
+        .devices
+        .devices()
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .map(|device| (device.node_id, device.display_name))
+        .collect();
+    let mut changes = audit::describe(&before, &after, &names);
+    if changes.is_empty() && path.starts_with("/v1/alerts") {
+        let what = if path.ends_with("/test") {
+            "Sent a test alert"
+        } else {
+            "Changed alert settings"
+        };
+        changes.push((what.to_owned(), None));
+    }
+    for (message, subject) in changes {
+        let event = Event::new(
+            Severity::Info,
+            Category::Change,
+            "settings.changed",
+            message,
+        )
+        .by(actor.clone(), client.clone());
+        events.record(match subject {
+            Some(subject) => event.subject(subject),
+            None => event,
+        });
+    }
+    response
+}
+
+async fn get_events(State(api): State<Arc<Api>>, Query(query): Query<events::Query>) -> Response {
+    let events = api
+        .events
+        .as_ref()
+        .map(|events| events.query(&query))
+        .unwrap_or_default();
+    Json(json!({ "events": events })).into_response()
+}
+
+/// Account events from the console (sign-ins, password changes). The console
+/// never forwards browser requests here.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ConsoleEvent {
+    severity: Severity,
+    kind: String,
+    message: String,
+    #[serde(default)]
+    actor: Option<String>,
+    #[serde(default)]
+    client: Option<String>,
+}
+
+async fn post_console_event(
+    State(api): State<Arc<Api>>,
+    Json(event): Json<ConsoleEvent>,
+) -> Response {
+    let valid_kind = event.kind.len() <= 64
+        && event.kind.strip_prefix("console.").is_some_and(|rest| {
+            !rest.is_empty()
+                && rest
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte == b'_')
+        });
+    if !valid_kind {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            anyhow::anyhow!("console events have kinds like console.sign_in"),
+        );
+    }
+    let short = |value: Option<String>| value.map(|value| value.chars().take(128).collect());
+    let Some(events) = &api.events else {
+        return StatusCode::NO_CONTENT.into_response();
+    };
+    events.record(
+        Event::new(event.severity, Category::Access, &event.kind, event.message)
+            .by(short(event.actor), short(event.client)),
+    );
+    StatusCode::NO_CONTENT.into_response()
 }
 
 async fn get_status(State(api): State<Arc<Api>>) -> Response {

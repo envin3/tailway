@@ -11,6 +11,7 @@ All notable changes to Tailway are listed here. Versions follow [Semantic Versio
 - A **Performance** section in the guide, with the recommended host settings.
 - **Keep me signed in on this device** at sign-in: the session lasts until 30 days without a visit (at most 180 days) and survives restarts and upgrades.
 - **Sign out other browsers** on the account page, which also shows how many other browsers are signed in.
+- An event history, kept across restarts in `state/events/`: locations connecting and failing, device route changes with the reason, every settings change with who made it, sign-ins and failed sign-ins with the client address, password changes and resets, and alerts. Shown on the new **Activity** page and on the dashboard, and available at `GET /v1/events`.
 
 ### Changed
 

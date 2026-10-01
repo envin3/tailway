@@ -10,6 +10,8 @@ use serde::Serialize;
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 
+use crate::events::{Category, Event, EventLog, Severity};
+
 pub const QUEUE_LENGTH: usize = 64;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -43,6 +45,7 @@ struct Condition {
 pub struct Alerts {
     conditions: Mutex<BTreeMap<String, Condition>>,
     sender: Option<mpsc::Sender<Notification>>,
+    events: Option<std::sync::Arc<EventLog>>,
 }
 
 impl Alerts {
@@ -51,7 +54,14 @@ impl Alerts {
         Self {
             conditions: Mutex::new(BTreeMap::new()),
             sender,
+            events: None,
         }
+    }
+
+    /// Records every notification in the event history as well.
+    pub fn with_events(mut self, events: std::sync::Arc<EventLog>) -> Self {
+        self.events = Some(events);
+        self
     }
 
     fn conditions(&self) -> std::sync::MutexGuard<'_, BTreeMap<String, Condition>> {
@@ -105,10 +115,16 @@ impl Alerts {
     }
 
     fn send(&self, notification: Notification) {
-        match notification.kind {
-            "problem" => warn!(key = %notification.key, message = %notification.message, "alert"),
-            _ => {
-                info!(key = %notification.key, message = %notification.message, "alert {}", notification.kind)
+        if let Some(events) = &self.events {
+            events.record(event(&notification));
+        } else {
+            match notification.kind {
+                "problem" => {
+                    warn!(key = %notification.key, message = %notification.message, "alert")
+                }
+                _ => {
+                    info!(key = %notification.key, message = %notification.message, "alert {}", notification.kind)
+                }
             }
         }
         if let Some(sender) = &self.sender
@@ -160,6 +176,25 @@ fn observe(
         }
     }
     notifications
+}
+
+/// A notification as it appears in the event history.
+fn event(notification: &Notification) -> Event {
+    let (severity, category, kind) = match notification.kind {
+        "problem" => (Severity::Warning, Category::Health, "alert.problem"),
+        "resolved" => (Severity::Info, Category::Health, "alert.resolved"),
+        _ => (Severity::Info, Category::System, "alert.info"),
+    };
+    let event = Event::new(
+        severity,
+        category,
+        kind,
+        format!("{}: {}", notification.title, notification.message),
+    );
+    match notification.key.split_once(':') {
+        Some((_, subject)) => event.subject(subject),
+        None => event,
+    }
 }
 
 fn title(key: &str) -> String {

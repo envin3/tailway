@@ -26,6 +26,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 use tailway::account::{self, Account, AccountStore};
+use tailway::audit::{ACTOR_HEADER, CLIENT_HEADER};
 use tailway::mail::{EmailRecovery, Security, Smtp};
 use tailway::sessions::{self, SessionStore, StoredSession};
 use tokio::net::UnixStream;
@@ -160,7 +161,18 @@ async fn main() -> Result<()> {
         return Ok(());
     }
     if arguments.first().map(String::as_str) == Some("reset-password") {
-        return reset_password(&arguments[1..]);
+        let username = reset_password(&arguments[1..])?;
+        let socket = PathBuf::from(environment("CONTROL_SOCKET", "/run/tailway/control.sock"));
+        send_event(
+            &socket,
+            "warning",
+            "console.password_reset",
+            "Reset the console password on the server; every browser was signed out".into(),
+            Some(username),
+            Some("server".into()),
+        )
+        .await;
+        return Ok(());
     }
     let directory = account_directory();
     let accounts = AccountStore::new(&directory);
@@ -210,7 +222,7 @@ fn account_directory() -> PathBuf {
 
 /// `gateway-ui reset-password [--username NAME]`, new password on stdin. The
 /// last resort when the password is lost and email recovery is unavailable.
-fn reset_password(arguments: &[String]) -> Result<()> {
+fn reset_password(arguments: &[String]) -> Result<String> {
     let username = match arguments {
         [] => None,
         [flag, username] if flag == "--username" => Some(username.clone()),
@@ -232,7 +244,7 @@ fn reset_password(arguments: &[String]) -> Result<()> {
     store.save(&account)?;
     SessionStore::new(account_directory()).save(&[])?;
     eprintln!("Console password for {username} reset; existing sessions have ended.");
-    Ok(())
+    Ok(username)
 }
 
 fn router(state: Arc<UiState>) -> Router {
@@ -321,7 +333,23 @@ async fn session(
     )
 }
 
-async fn proxy_agent(State(state): State<Arc<UiState>>, request: Request) -> Response {
+async fn proxy_agent(State(state): State<Arc<UiState>>, mut request: Request) -> Response {
+    // Account events come from the console itself, never from a browser.
+    if request.uri().path() == "/v1/events" && request.method() != Method::GET {
+        return json_error(StatusCode::FORBIDDEN, "events are read-only");
+    }
+    // The agent records who changed what; only the console may say who.
+    let client = client_address(&request);
+    let actor = state.accounts.load().map(|account| account.username).ok();
+    let headers = request.headers_mut();
+    headers.remove(ACTOR_HEADER);
+    headers.remove(CLIENT_HEADER);
+    if let Some(Ok(actor)) = actor.map(|actor| HeaderValue::from_str(&actor)) {
+        headers.insert(ACTOR_HEADER, actor);
+    }
+    if let Ok(client) = HeaderValue::from_str(&client) {
+        headers.insert(CLIENT_HEADER, client);
+    }
     proxy_to(&state.socket_path, request, "gateway agent").await
 }
 
@@ -466,11 +494,30 @@ async fn same_origin_json(request: Request, next: Next) -> Response {
     next.run(request).await
 }
 
+/// The client's address. Behind `tailscale serve` every connection comes from
+/// loopback, and Tailscale appends the real tailnet address to
+/// `X-Forwarded-For`; only the last entry is trusted, and only from loopback.
 fn client_address(request: &Request) -> String {
-    request
+    let Some(peer) = request
         .extensions()
         .get::<ConnectInfo<SocketAddr>>()
-        .map_or_else(|| "unknown".into(), |address| address.0.ip().to_string())
+        .map(|address| address.0.ip())
+    else {
+        return "unknown".into();
+    };
+    if peer.is_loopback()
+        && let Some(forwarded) = request
+            .headers()
+            .get_all("x-forwarded-for")
+            .iter()
+            .filter_map(|value| value.to_str().ok())
+            .flat_map(|value| value.split(','))
+            .next_back()
+            .and_then(|value| value.trim().parse::<std::net::IpAddr>().ok())
+    {
+        return forwarded.to_string();
+    }
+    peer.to_string()
 }
 
 async fn read_json<T: DeserializeOwned>(request: Request) -> Result<(String, T), Response> {
@@ -546,6 +593,14 @@ async fn signup(State(state): State<Arc<UiState>>, request: Request) -> Response
         return json_error(StatusCode::CONFLICT, &format!("{error:#}"));
     }
     warn!(%client, username = %account.username, "console account created");
+    record_access(
+        &state,
+        "info",
+        "console.account_created",
+        format!("Created the console account {}", account.username),
+        Some(account.username.clone()),
+        &client,
+    );
     signed_in(&state, &account, signup.remember).await
 }
 
@@ -586,10 +641,30 @@ async fn login(State(state): State<Arc<UiState>>, request: Request) -> Response 
         .unwrap_u8()
         == 1;
     if !(password_valid && username_valid) {
+        record_access(
+            &state,
+            "warning",
+            "console.sign_in_failed",
+            "Failed sign-in: wrong username or password".into(),
+            None,
+            &client,
+        );
         record_failure(&state, client).await;
         return json_error(StatusCode::UNAUTHORIZED, "wrong username or password");
     }
     state.failures.lock().await.remove(&client);
+    record_access(
+        &state,
+        "info",
+        "console.sign_in",
+        if credentials.remember {
+            "Signed in, staying signed in on this browser".into()
+        } else {
+            "Signed in".into()
+        },
+        Some(account.username.clone()),
+        &client,
+    );
     signed_in(&state, &account, credentials.remember).await
 }
 
@@ -609,7 +684,16 @@ async fn signed_in(state: &UiState, account: &Account, remember: bool) -> Respon
 async fn logout(
     State(state): State<Arc<UiState>>,
     Extension(context): Extension<SessionContext>,
+    request: Request,
 ) -> Response {
+    record_access(
+        &state,
+        "info",
+        "console.sign_out",
+        "Signed out".into(),
+        state.accounts.load().map(|account| account.username).ok(),
+        &client_address(&request),
+    );
     {
         let mut sessions = state.sessions.lock().await;
         if sessions
@@ -683,12 +767,21 @@ async fn get_account(
 async fn end_other_sessions(
     State(state): State<Arc<UiState>>,
     Extension(context): Extension<SessionContext>,
+    request: Request,
 ) -> Response {
     let mut sessions = state.sessions.lock().await;
     let before = sessions.len();
     sessions.retain(|key, _| *key == context.key);
     let ended = before - sessions.len();
     save_sessions(&state, &mut sessions);
+    record_access(
+        &state,
+        "info",
+        "console.signed_out_others",
+        format!("Signed out {ended} other browser(s)"),
+        state.accounts.load().map(|account| account.username).ok(),
+        &client_address(&request),
+    );
     info!(ended, "other console sessions ended");
     json_response(StatusCode::OK, json!({"ended": ended}))
 }
@@ -788,6 +881,14 @@ async fn update_account(
     };
     // A stolen session must not be enough to take the account over.
     if !verify_password(&current, update.current_password).await {
+        record_access(
+            &state,
+            "warning",
+            "console.password_check_failed",
+            "Wrong current password when changing account settings".into(),
+            Some(current.username.clone()),
+            &client,
+        );
         record_failure(&state, client).await;
         return json_error(StatusCode::FORBIDDEN, "the current password is wrong");
     }
@@ -830,6 +931,35 @@ async fn update_account(
         save_sessions(&state, &mut sessions);
     }
     info!(username = %updated.username, password_changed, "console account updated");
+    let mut changed = Vec::new();
+    if updated.username != current.username {
+        changed.push(format!(
+            "renamed the account from {} to {}",
+            current.username, updated.username
+        ));
+    }
+    if password_changed {
+        changed.push("changed the password; other browsers were signed out".to_owned());
+    }
+    if updated.recovery != current.recovery {
+        changed.push(if updated.recovery.is_some() {
+            "changed password recovery by email".to_owned()
+        } else {
+            "turned off password recovery by email".to_owned()
+        });
+    }
+    if !changed.is_empty() {
+        let mut message = changed.join("; ");
+        message[..1].make_ascii_uppercase();
+        record_access(
+            &state,
+            "info",
+            "console.account_changed",
+            message,
+            Some(updated.username.clone()),
+            &client,
+        );
+    }
     json_response(
         StatusCode::OK,
         json!({
@@ -921,6 +1051,17 @@ async fn request_recovery(State(state): State<Arc<UiState>>, request: Request) -
     });
     recovery.last_sent = Some(Instant::now());
     warn!(%client, "console password recovery code emailed");
+    record_access(
+        &state,
+        "warning",
+        "console.recovery_requested",
+        format!(
+            "A password reset code was emailed to {}",
+            settings.masked_email()
+        ),
+        None,
+        &client,
+    );
     json_response(
         StatusCode::OK,
         json!({"sent": true, "to": settings.masked_email()}),
@@ -967,6 +1108,14 @@ async fn reset_with_code(State(state): State<Arc<UiState>>, request: Request) ->
                 recovery.pending = None;
             }
             drop(recovery);
+            record_access(
+                &state,
+                "warning",
+                "console.recovery_failed",
+                "Wrong password reset code".into(),
+                None,
+                &client,
+            );
             record_failure(&state, client).await;
             return json_error(StatusCode::BAD_REQUEST, "wrong code");
         }
@@ -992,6 +1141,15 @@ async fn reset_with_code(State(state): State<Arc<UiState>>, request: Request) ->
     }
     state.failures.lock().await.remove(&client);
     warn!(%client, "console password reset with an emailed recovery code");
+    record_access(
+        &state,
+        "warning",
+        "console.password_reset",
+        "Reset the console password with an emailed code; every other browser was signed out"
+            .into(),
+        Some(account.username.clone()),
+        &client,
+    );
     signed_in(&state, &account, false).await
 }
 
@@ -1238,7 +1396,69 @@ async fn record_failure(state: &UiState, client: String) {
             failures.remove(&oldest);
         }
     }
-    failures.entry(client).or_default().push(now);
+    let recent = failures.entry(client.clone()).or_default();
+    recent.push(now);
+    if recent.len() == MAX_FAILURES {
+        drop(failures);
+        record_access(
+            state,
+            "error",
+            "console.blocked",
+            "Too many failed attempts: sign-in from this address is blocked for a few minutes"
+                .into(),
+            None,
+            &client,
+        );
+    }
+}
+
+/// Records an account event in the gateway's event history. Best effort: the
+/// console works without the agent, and nothing waits for this.
+fn record_access(
+    state: &UiState,
+    severity: &'static str,
+    kind: &'static str,
+    message: String,
+    actor: Option<String>,
+    client: &str,
+) {
+    let socket = state.socket_path.clone();
+    let client = Some(client.to_owned());
+    tokio::spawn(async move { send_event(&socket, severity, kind, message, actor, client).await });
+}
+
+async fn send_event(
+    socket: &Path,
+    severity: &str,
+    kind: &str,
+    message: String,
+    actor: Option<String>,
+    client: Option<String>,
+) {
+    let body = json!({
+        "severity": severity,
+        "kind": kind,
+        "message": message,
+        "actor": actor,
+        "client": client,
+    });
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json"),
+    );
+    let recorded = exchange(
+        socket,
+        Method::POST,
+        "/v1/events",
+        headers,
+        body.to_string().into_bytes(),
+    )
+    .await
+    .is_ok_and(|(parts, _)| parts.status.is_success());
+    if !recorded {
+        warn!(kind, "cannot record a console event in the event history");
+    }
 }
 
 fn with_content_type(body: &str, content_type: &'static str) -> Response {
@@ -2436,6 +2656,98 @@ mod tests {
             );
         }
         upstream.abort();
+    }
+
+    /// A fake agent that answers every request with 200 and hands over the
+    /// raw request it received.
+    fn fake_agent(socket_path: PathBuf) -> tokio::sync::mpsc::UnboundedReceiver<String> {
+        let listener = tokio::net::UnixListener::bind(&socket_path).unwrap();
+        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            loop {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut buffer = vec![0_u8; 8192];
+                let length = stream.read(&mut buffer).await.unwrap();
+                let _ = sender.send(String::from_utf8_lossy(&buffer[..length]).to_lowercase());
+                let _ = stream
+                    .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\n{}")
+                    .await;
+            }
+        });
+        receiver
+    }
+
+    #[tokio::test]
+    async fn tells_the_agent_who_is_asking_and_ignores_what_browsers_claim() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut received = fake_agent(directory.path().join("agent.sock"));
+        let mut fixture = fixture(directory.path().join("agent.sock"));
+        let (cookie, csrf) = signed_in_session(&mut fixture.router, PASSWORD).await;
+        // The sign-in itself is recorded as an event.
+        let sign_in = received.recv().await.unwrap();
+        assert!(sign_in.starts_with("post /v1/events"), "{sign_in}");
+        assert!(sign_in.contains("console.sign_in"), "{sign_in}");
+
+        let response = send(
+            &mut fixture.router,
+            Method::PUT,
+            "/v1/routes/node-1",
+            &[
+                ("cookie", &cookie),
+                ("x-csrf-token", &csrf),
+                ("x-tailway-actor", "mallory"),
+                ("x-tailway-client", "10.9.9.9"),
+                // Loopback peer (as behind tailscale serve): the last entry counts.
+                ("x-forwarded-for", "6.6.6.6, 100.113.53.91"),
+            ],
+            Some(json!({"exitId": "__direct__"})),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let forwarded = received.recv().await.unwrap();
+        assert!(forwarded.contains("x-tailway-actor: admin"), "{forwarded}");
+        assert!(
+            forwarded.contains("x-tailway-client: 100.113.53.91"),
+            "{forwarded}"
+        );
+        assert!(!forwarded.contains("mallory") && !forwarded.contains("10.9.9.9"));
+
+        let forged = send(
+            &mut fixture.router,
+            Method::POST,
+            "/v1/events",
+            &[("cookie", &cookie), ("x-csrf-token", &csrf)],
+            Some(json!({"severity": "info", "kind": "console.sign_in", "message": "forged"})),
+        )
+        .await;
+        assert_eq!(forged.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[test]
+    fn trusts_forwarded_addresses_only_from_loopback() {
+        let request = |peer: [u8; 4], forwarded: &str| {
+            let mut request = Request::builder()
+                .header("x-forwarded-for", forwarded)
+                .body(Body::empty())
+                .unwrap();
+            request
+                .extensions_mut()
+                .insert(ConnectInfo(SocketAddr::from((peer, 40000))));
+            request
+        };
+        assert_eq!(
+            client_address(&request([127, 0, 0, 1], "6.6.6.6, 100.64.0.7")),
+            "100.64.0.7"
+        );
+        assert_eq!(
+            client_address(&request([192, 168, 0, 20], "100.64.0.7")),
+            "192.168.0.20"
+        );
+        assert_eq!(
+            client_address(&request([127, 0, 0, 1], "garbage")),
+            "127.0.0.1"
+        );
     }
 
     #[test]

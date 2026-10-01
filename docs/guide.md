@@ -168,6 +168,19 @@ A single device's speed is normally limited by its VPN location, not the gateway
 
 To run images built elsewhere, copy `compose.yaml` and `.env`, load the images with `docker load`, set `IMAGE_TAG` in `.env`, and start with `docker compose up -d --no-build`.
 
+## Activity
+
+The **Activity** page, and **Recent activity** on the dashboard, show what happened on the gateway:
+
+- **Locations and routes:** a location connecting, degrading, going down or recovering, its public IP changing, and each device whose route changed, with the reason, e.g. `envin-desktop: ES#146 → blocked while ES#146 is down`.
+- **Changes:** every settings change made in the console or the API, with the console user and their address, e.g. `Set the route of envin-desktop to NL#227`. Rejected requests are recorded too.
+- **Sign-ins:** successful and failed sign-ins with the client address, blocked addresses, password changes, and password resets by email or on the server. Failed sign-ins don't record the username that was tried.
+- **Alerts** raised and resolved, and the gateway starting and stopping.
+
+Behind `tailscale serve`, the client address is the device's tailnet address, taken from the header Tailscale adds.
+
+The history is stored as JSON lines in `state/events/`, in five files of up to 1 MB each (many months of normal activity). The oldest file is dropped when the newest fills. Unlike the container logs, it survives restarts and upgrades. `GET /v1/events` returns it, newest first, with optional `category` (`health`, `change`, `access`, `system`), `severity` (minimum: `info`, `warning`, `error`), `search`, `before` (Unix time, for paging), and `limit` (up to 500).
+
 ## Logs
 
 `docker compose logs gateway-agent` shows the agent, the console, and Tailscale. Tailscale's routine messages are hidden unless `TAILSCALE_LOG=verbose`; its warnings and errors always show. `LOG_LEVEL=debug` adds detail, and `LOG_FORMAT=json` writes one JSON object per line for collectors such as Loki or journald. Logs rotate at 10 MB, five files per container, and are lost when a container is replaced.
