@@ -89,7 +89,7 @@ Proton support is unofficial; see the README. Sign in under **Settings → Proto
 
 The console account is created on the first visit. Sign-up closes as soon as it exists. To set the password in advance instead, so sign-up never appears, run `scripts/create-ui-secrets.sh` before starting. Change the username and password on **Settings → Account & security**. Changing the password signs out every other session.
 
-**Sessions** use an `HttpOnly`, `Secure`, `SameSite=Strict` cookie that expires after 30 minutes idle or 12 hours, plus a per-session CSRF token for every change. Sign-in must come from the console's own origin. Ten failed attempts from one address within five minutes block that address for the rest of the window. Existing sessions keep working. Behind `tailscale serve`, all clients share one address for this limit.
+**Sessions** use an `HttpOnly`, `Secure`, `SameSite=Strict` cookie, plus a per-session CSRF token for every change. A session ends when the browser closes, after 30 minutes idle, or after 12 hours. With **Keep me signed in on this device** ticked at sign-in, it lasts until the browser goes 30 days without visiting, and at most 180 days, and it survives restarts and upgrades. Only a hash of each remembered session is stored, in `ui-auth/sessions.json`. **Settings → Account & security → Sign out other browsers** ends every session but your own, and so does changing or resetting the password. Sign-in must come from the console's own origin. Ten failed attempts from one address within five minutes block that address for the rest of the window. Existing sessions keep working. Behind `tailscale serve`, all clients share one address for this limit.
 
 **A forgotten password** can be reset two ways:
 

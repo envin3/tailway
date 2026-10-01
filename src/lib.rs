@@ -16,6 +16,7 @@ pub mod policy;
 pub mod probe;
 pub mod proton;
 pub mod reconcile;
+pub mod sessions;
 pub mod state;
 pub mod tailscale;
 pub mod usage;

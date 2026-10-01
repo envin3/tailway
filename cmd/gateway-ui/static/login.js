@@ -22,7 +22,11 @@ document.querySelector("#login-form").addEventListener("submit", async event => 
   const password = document.querySelector("#login-password");
   message("Signing in…");
   try {
-    await post("/auth/login", { username: document.querySelector("#login-username").value.trim(), password: password.value });
+    await post("/auth/login", {
+      username: document.querySelector("#login-username").value.trim(),
+      password: password.value,
+      remember: document.querySelector("#login-remember").checked
+    });
     location.replace("/");
   } catch (error) {
     password.value = "";
@@ -66,7 +70,11 @@ document.querySelector("#signup-form").addEventListener("submit", async event =>
   if (password !== document.querySelector("#signup-confirm").value) return message("The passwords do not match.", "bad");
   message("Creating the account…");
   try {
-    await post("/auth/signup", { username: document.querySelector("#signup-username").value.trim(), password });
+    await post("/auth/signup", {
+      username: document.querySelector("#signup-username").value.trim(),
+      password,
+      remember: document.querySelector("#signup-remember").checked
+    });
     location.replace("/");
   } catch (error) {
     message(error.message, "bad");

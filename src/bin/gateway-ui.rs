@@ -27,6 +27,7 @@ use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 use tailway::account::{self, Account, AccountStore};
 use tailway::mail::{EmailRecovery, Security, Smtp};
+use tailway::sessions::{self, SessionStore, StoredSession};
 use tokio::net::UnixStream;
 use tokio::sync::Mutex;
 use tracing::{info, warn};
@@ -81,8 +82,15 @@ const ICONS: &[(&str, &[u8], &str)] = &[
 ];
 
 const SESSION_COOKIE: &str = "tailway_session";
-const SESSION_IDLE_TIMEOUT: Duration = Duration::from_secs(30 * 60);
-const SESSION_LIFETIME: Duration = Duration::from_secs(12 * 60 * 60);
+/// Session limits in seconds. A session ends when unused for its idle timeout
+/// or when its lifetime is over, whichever comes first.
+const SESSION_IDLE_TIMEOUT: u64 = 30 * 60;
+const SESSION_LIFETIME: u64 = 12 * 60 * 60;
+/// "Keep me signed in": until unused for 30 days, and at most 180 days.
+const REMEMBERED_IDLE_TIMEOUT: u64 = 30 * 24 * 60 * 60;
+const REMEMBERED_LIFETIME: u64 = 180 * 24 * 60 * 60;
+/// How far a remembered session's saved last use may lag behind.
+const REMEMBERED_SAVE_INTERVAL: u64 = 60 * 60;
 const MAX_SESSIONS: usize = 64;
 const FAILURE_WINDOW: Duration = Duration::from_secs(5 * 60);
 const MAX_FAILURES: usize = 10;
@@ -102,6 +110,8 @@ struct UiState {
     accounts: AccountStore,
     bcrypt_cost: u32,
     sessions: Mutex<HashMap<[u8; 32], Session>>,
+    /// Where remembered sessions are kept across restarts.
+    session_store: SessionStore,
     failures: Mutex<HashMap<String, Vec<Instant>>>,
     recovery: Mutex<Recovery>,
     /// Serializes sign-up so only one first account can be created.
@@ -112,8 +122,13 @@ struct Session {
     csrf_token: Arc<str>,
     /// The password generation the session was opened under.
     generation: [u8; 32],
-    created: Instant,
-    last_seen: Instant,
+    /// Unix seconds: remembered sessions outlive reboots.
+    created: u64,
+    last_seen: u64,
+    /// Kept across restarts, with the longer limits.
+    remember: bool,
+    /// `last_seen` as last saved (remembered sessions only).
+    saved_seen: u64,
 }
 
 /// Attached to every authenticated request.
@@ -121,6 +136,7 @@ struct Session {
 struct SessionContext {
     key: [u8; 32],
     csrf_token: Arc<str>,
+    remember: bool,
 }
 
 #[derive(Default)]
@@ -146,7 +162,8 @@ async fn main() -> Result<()> {
     if arguments.first().map(String::as_str) == Some("reset-password") {
         return reset_password(&arguments[1..]);
     }
-    let accounts = AccountStore::new(account_directory());
+    let directory = account_directory();
+    let accounts = AccountStore::new(&directory);
     // Without an account the console still starts, offering sign-up.
     let username = if accounts.exists() {
         Some(accounts.load()?.username)
@@ -162,10 +179,12 @@ async fn main() -> Result<()> {
         accounts,
         bcrypt_cost: account::BCRYPT_COST,
         sessions: Mutex::new(HashMap::new()),
+        session_store: SessionStore::new(&directory),
         failures: Mutex::new(HashMap::new()),
         recovery: Mutex::new(Recovery::default()),
         signup: Mutex::new(()),
     });
+    let restored = restore_sessions(&state).await;
     let address = parse_address(&environment("LISTEN_ADDRESS", ":8443"))?;
     let tls = RustlsConfig::from_pem_file(
         required_environment("TLS_CERT_FILE")?,
@@ -173,7 +192,7 @@ async fn main() -> Result<()> {
     )
     .await?;
     match &username {
-        Some(username) => info!(%address, %username, "gateway console ready"),
+        Some(username) => info!(%address, %username, restored, "gateway console ready"),
         None => warn!(
             %address,
             "gateway console ready with no account: the first visitor creates it; open the console now"
@@ -211,6 +230,7 @@ fn reset_password(arguments: &[String]) -> Result<()> {
     let mut account = account::new_account(&username, password)?;
     account.recovery = current.and_then(|account| account.recovery);
     store.save(&account)?;
+    SessionStore::new(account_directory()).save(&[])?;
     eprintln!("Console password for {username} reset; existing sessions have ended.");
     Ok(())
 }
@@ -242,6 +262,7 @@ fn router(state: Arc<UiState>) -> Router {
         .route("/auth/account", get(get_account).put(update_account))
         .route("/auth/recovery/test", post(test_recovery_email))
         .route("/auth/logout", post(logout))
+        .route("/auth/sessions/end-others", post(end_other_sessions))
         .route("/v1/proton/{*path}", any(proxy_proton))
         .route("/v1/{*path}", any(proxy_agent))
         .with_state(state.clone())
@@ -496,6 +517,8 @@ async fn auth_status(State(state): State<Arc<UiState>>) -> Response {
 struct SignupRequest {
     username: String,
     password: String,
+    #[serde(default)]
+    remember: bool,
 }
 
 /// Creates the console account; only while none exists.
@@ -523,7 +546,7 @@ async fn signup(State(state): State<Arc<UiState>>, request: Request) -> Response
         return json_error(StatusCode::CONFLICT, &format!("{error:#}"));
     }
     warn!(%client, username = %account.username, "console account created");
-    signed_in(&state, &account).await
+    signed_in(&state, &account, signup.remember).await
 }
 
 #[derive(Deserialize)]
@@ -531,6 +554,9 @@ async fn signup(State(state): State<Arc<UiState>>, request: Request) -> Response
 struct LoginRequest {
     username: String,
     password: String,
+    /// "Keep me signed in on this device".
+    #[serde(default)]
+    remember: bool,
 }
 
 async fn login(State(state): State<Arc<UiState>>, request: Request) -> Response {
@@ -564,17 +590,17 @@ async fn login(State(state): State<Arc<UiState>>, request: Request) -> Response 
         return json_error(StatusCode::UNAUTHORIZED, "wrong username or password");
     }
     state.failures.lock().await.remove(&client);
-    signed_in(&state, &account).await
+    signed_in(&state, &account, credentials.remember).await
 }
 
 /// Opens a session for `account` and returns its CSRF token with the cookie.
-async fn signed_in(state: &UiState, account: &Account) -> Response {
-    let (token, context) = create_session(state, account.generation()).await;
+async fn signed_in(state: &UiState, account: &Account, remember: bool) -> Response {
+    let (token, context) = create_session(state, account.generation(), remember).await;
     let mut response = json_response(
         StatusCode::OK,
         json!({"csrfToken": &*context.csrf_token, "username": account.username}),
     );
-    if let Ok(cookie) = HeaderValue::from_str(&session_cookie(&token)) {
+    if let Ok(cookie) = HeaderValue::from_str(&session_cookie(&token, remember)) {
         response.headers_mut().append(header::SET_COOKIE, cookie);
     }
     response
@@ -584,7 +610,15 @@ async fn logout(
     State(state): State<Arc<UiState>>,
     Extension(context): Extension<SessionContext>,
 ) -> Response {
-    state.sessions.lock().await.remove(&context.key);
+    {
+        let mut sessions = state.sessions.lock().await;
+        if sessions
+            .remove(&context.key)
+            .is_some_and(|session| session.remember)
+        {
+            save_sessions(&state, &mut sessions);
+        }
+    }
     let mut response = json_response(StatusCode::OK, json!({"signedOut": true}));
     response.headers_mut().append(
         header::SET_COOKIE,
@@ -611,10 +645,28 @@ fn recovery_view(recovery: &EmailRecovery) -> Value {
     })
 }
 
-async fn get_account(State(state): State<Arc<UiState>>) -> Response {
+async fn get_account(
+    State(state): State<Arc<UiState>>,
+    Extension(context): Extension<SessionContext>,
+) -> Response {
     let account = match state.accounts.load() {
         Ok(account) => account,
         Err(error) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, &format!("{error:#}")),
+    };
+    let others = {
+        let now = sessions::now();
+        let generation = account.generation();
+        state
+            .sessions
+            .lock()
+            .await
+            .iter()
+            .filter(|(key, session)| {
+                **key != context.key
+                    && session.generation == generation
+                    && !session_expired(session, now)
+            })
+            .count()
     };
     json_response(
         StatusCode::OK,
@@ -622,8 +674,23 @@ async fn get_account(State(state): State<Arc<UiState>>) -> Response {
             "username": account.username,
             "passwordChangedAt": (account.password_changed_at > 0).then_some(account.password_changed_at),
             "recovery": account.recovery.as_ref().map(recovery_view),
+            "sessions": {"others": others, "remembered": context.remember},
         }),
     )
+}
+
+/// Signs out every other browser, including remembered ones.
+async fn end_other_sessions(
+    State(state): State<Arc<UiState>>,
+    Extension(context): Extension<SessionContext>,
+) -> Response {
+    let mut sessions = state.sessions.lock().await;
+    let before = sessions.len();
+    sessions.retain(|key, _| *key == context.key);
+    let ended = before - sessions.len();
+    save_sessions(&state, &mut sessions);
+    info!(ended, "other console sessions ended");
+    json_response(StatusCode::OK, json!({"ended": ended}))
 }
 
 #[derive(Deserialize)]
@@ -760,6 +827,7 @@ async fn update_account(
         if let Some(session) = sessions.get_mut(&context.key) {
             session.generation = updated.generation();
         }
+        save_sessions(&state, &mut sessions);
     }
     info!(username = %updated.username, password_changed, "console account updated");
     json_response(
@@ -917,17 +985,25 @@ async fn reset_with_code(State(state): State<Arc<UiState>>, request: Request) ->
     if let Err(error) = state.accounts.save(&account) {
         return json_error(StatusCode::INTERNAL_SERVER_ERROR, &format!("{error:#}"));
     }
-    state.sessions.lock().await.clear();
+    {
+        let mut sessions = state.sessions.lock().await;
+        sessions.clear();
+        save_sessions(&state, &mut sessions);
+    }
     state.failures.lock().await.remove(&client);
     warn!(%client, "console password reset with an emailed recovery code");
-    signed_in(&state, &account).await
+    signed_in(&state, &account, false).await
 }
 
-fn session_cookie(token: &str) -> String {
-    format!(
-        "{SESSION_COOKIE}={token}; Path=/; Max-Age={}; Secure; HttpOnly; SameSite=Strict",
-        SESSION_LIFETIME.as_secs()
-    )
+/// A remembered session's cookie lasts as long as the session can; any other
+/// is a browser-session cookie, gone when the browser closes.
+fn session_cookie(token: &str, remember: bool) -> String {
+    let max_age = if remember {
+        format!("; Max-Age={REMEMBERED_LIFETIME}")
+    } else {
+        String::new()
+    };
+    format!("{SESSION_COOKIE}={token}; Path=/{max_age}; Secure; HttpOnly; SameSite=Strict")
 }
 
 fn session_token(headers: &HeaderMap) -> Option<&str> {
@@ -954,33 +1030,116 @@ fn random_hex() -> String {
     hex::encode(bytes)
 }
 
-fn session_expired(session: &Session, now: Instant) -> bool {
-    now.duration_since(session.created) > SESSION_LIFETIME
-        || now.duration_since(session.last_seen) > SESSION_IDLE_TIMEOUT
+fn session_expired(session: &Session, now: u64) -> bool {
+    let (idle, lifetime) = if session.remember {
+        (REMEMBERED_IDLE_TIMEOUT, REMEMBERED_LIFETIME)
+    } else {
+        (SESSION_IDLE_TIMEOUT, SESSION_LIFETIME)
+    };
+    now.saturating_sub(session.created) > lifetime || now.saturating_sub(session.last_seen) > idle
+}
+
+fn remembered_count(sessions: &HashMap<[u8; 32], Session>) -> usize {
+    sessions.values().filter(|session| session.remember).count()
+}
+
+/// Writes the remembered sessions to disk. A failure costs only a sign-in
+/// after the next restart.
+fn save_sessions(state: &UiState, sessions: &mut HashMap<[u8; 32], Session>) {
+    let stored: Vec<StoredSession> = sessions
+        .iter()
+        .filter(|(_, session)| session.remember)
+        .map(|(key, session)| StoredSession {
+            key: hex::encode(key),
+            csrf_token: session.csrf_token.to_string(),
+            generation: hex::encode(session.generation),
+            created: session.created,
+            last_seen: session.last_seen,
+        })
+        .collect();
+    match state.session_store.save(&stored) {
+        Ok(()) => {
+            for session in sessions.values_mut() {
+                session.saved_seen = session.last_seen;
+            }
+        }
+        Err(error) => {
+            warn!(error = %format!("{error:#}"), "cannot save remembered console sessions")
+        }
+    }
+}
+
+fn hash_from_hex(value: &str) -> Option<[u8; 32]> {
+    hex::decode(value).ok()?.try_into().ok()
+}
+
+/// Loads the remembered sessions still valid for the current password.
+async fn restore_sessions(state: &UiState) -> usize {
+    let Ok(generation) = state.accounts.load().map(|account| account.generation()) else {
+        return 0;
+    };
+    let now = sessions::now();
+    let mut sessions = state.sessions.lock().await;
+    for stored in state.session_store.load() {
+        let (Some(key), Some(stored_generation)) = (
+            hash_from_hex(&stored.key),
+            hash_from_hex(&stored.generation),
+        ) else {
+            continue;
+        };
+        let session = Session {
+            csrf_token: Arc::from(stored.csrf_token),
+            generation: stored_generation,
+            created: stored.created,
+            last_seen: stored.last_seen,
+            remember: true,
+            saved_seen: stored.last_seen,
+        };
+        if session.generation == generation && !session_expired(&session, now) {
+            sessions.insert(key, session);
+        }
+    }
+    save_sessions(state, &mut sessions);
+    sessions.len()
 }
 
 async fn resume_session(state: &UiState, headers: &HeaderMap) -> Option<SessionContext> {
     let token = session_token(headers)?;
     // A password changed elsewhere (the reset command) ends older sessions.
     let generation = state.accounts.load().ok()?.generation();
-    let now = Instant::now();
+    let now = sessions::now();
     let mut sessions = state.sessions.lock().await;
+    let remembered = remembered_count(&sessions);
     sessions
         .retain(|_, session| !session_expired(session, now) && session.generation == generation);
+    let mut changed = remembered_count(&sessions) != remembered;
     let key = session_key(token);
-    let session = sessions.get_mut(&key)?;
-    session.last_seen = now;
-    Some(SessionContext {
-        key,
-        csrf_token: session.csrf_token.clone(),
-    })
+    let context = sessions.get_mut(&key).map(|session| {
+        session.last_seen = now;
+        changed |=
+            session.remember && now.saturating_sub(session.saved_seen) >= REMEMBERED_SAVE_INTERVAL;
+        SessionContext {
+            key,
+            csrf_token: session.csrf_token.clone(),
+            remember: session.remember,
+        }
+    });
+    if changed {
+        save_sessions(state, &mut sessions);
+    }
+    context
 }
 
-async fn create_session(state: &UiState, generation: [u8; 32]) -> (String, SessionContext) {
+async fn create_session(
+    state: &UiState,
+    generation: [u8; 32],
+    remember: bool,
+) -> (String, SessionContext) {
     let token = random_hex();
     let csrf_token: Arc<str> = Arc::from(random_hex());
-    let now = Instant::now();
+    let now = sessions::now();
     let mut sessions = state.sessions.lock().await;
+    let remembered = remembered_count(&sessions);
     sessions.retain(|_, session| !session_expired(session, now));
     while sessions.len() >= MAX_SESSIONS {
         let Some(oldest) = sessions
@@ -992,6 +1151,7 @@ async fn create_session(state: &UiState, generation: [u8; 32]) -> (String, Sessi
         };
         sessions.remove(&oldest);
     }
+    let changed = remember || remembered_count(&sessions) != remembered;
     let key = session_key(&token);
     sessions.insert(
         key,
@@ -1000,9 +1160,21 @@ async fn create_session(state: &UiState, generation: [u8; 32]) -> (String, Sessi
             generation,
             created: now,
             last_seen: now,
+            remember,
+            saved_seen: now,
         },
     );
-    (token, SessionContext { key, csrf_token })
+    if changed {
+        save_sessions(state, &mut sessions);
+    }
+    (
+        token,
+        SessionContext {
+            key,
+            csrf_token,
+            remember,
+        },
+    )
 }
 
 async fn security_headers(request: Request, next: Next) -> Response {
@@ -1145,19 +1317,30 @@ mod tests {
     }
 
     /// A console on which no account has been created yet.
-    fn empty_fixture(socket_path: PathBuf) -> Fixture {
-        let directory = tempfile::tempdir().unwrap();
-        let accounts = AccountStore::new(directory.path());
-        let state = Arc::new(UiState {
+    fn test_state(socket_path: PathBuf, directory: &Path) -> Arc<UiState> {
+        Arc::new(UiState {
             socket_path,
             proton_socket_path: PathBuf::from("/nonexistent/proton.sock"),
-            accounts,
+            accounts: AccountStore::new(directory),
             bcrypt_cost: 4,
             sessions: Mutex::new(HashMap::new()),
+            session_store: SessionStore::new(directory),
             failures: Mutex::new(HashMap::new()),
             recovery: Mutex::new(Recovery::default()),
             signup: Mutex::new(()),
-        });
+        })
+    }
+
+    /// The same console after a restart: sessions come only from disk.
+    async fn restarted(fixture: &Fixture) -> Router {
+        let state = test_state(PathBuf::from("/nonexistent"), fixture._directory.path());
+        restore_sessions(&state).await;
+        router(state)
+    }
+
+    fn empty_fixture(socket_path: PathBuf) -> Fixture {
+        let directory = tempfile::tempdir().unwrap();
+        let state = test_state(socket_path, directory.path());
         Fixture {
             router: router(state.clone()),
             state,
@@ -2066,6 +2249,138 @@ mod tests {
         );
     }
 
+    async fn login_remembered(router: &mut Router, remember: bool) -> Response {
+        send(
+            router,
+            Method::POST,
+            "/auth/login",
+            &[],
+            Some(json!({"username": "admin", "password": PASSWORD, "remember": remember})),
+        )
+        .await
+    }
+
+    async fn username_for(router: &mut Router, cookie: &str) -> StatusCode {
+        send(router, Method::GET, "/session", &[("cookie", cookie)], None)
+            .await
+            .status()
+    }
+
+    #[tokio::test]
+    async fn remembered_sessions_survive_a_restart_and_others_do_not() {
+        let mut fixture = fixture(PathBuf::from("/nonexistent"));
+        let remembered = login_remembered(&mut fixture.router, true).await;
+        let set_cookie = remembered.headers()[header::SET_COOKIE].to_str().unwrap();
+        assert!(set_cookie.contains(&format!("Max-Age={REMEMBERED_LIFETIME}")));
+        let remembered = cookie_from(&remembered);
+        let plain = login_remembered(&mut fixture.router, false).await;
+        assert!(
+            !plain.headers()[header::SET_COOKIE]
+                .to_str()
+                .unwrap()
+                .contains("Max-Age"),
+            "a browser-session cookie"
+        );
+        let plain = cookie_from(&plain);
+
+        let saved =
+            std::fs::read_to_string(fixture._directory.path().join("sessions.json")).unwrap();
+        let token = remembered.split_once('=').unwrap().1;
+        assert!(!saved.contains(token), "only the token's hash is stored");
+
+        let mut router = restarted(&fixture).await;
+        assert_eq!(username_for(&mut router, &remembered).await, StatusCode::OK);
+        assert_eq!(
+            username_for(&mut router, &plain).await,
+            StatusCode::UNAUTHORIZED
+        );
+    }
+
+    #[tokio::test]
+    async fn signing_out_other_devices_ends_remembered_sessions_too() {
+        let mut fixture = fixture(PathBuf::from("/nonexistent"));
+        let other = cookie_from(&login_remembered(&mut fixture.router, true).await);
+        let (cookie, csrf) = signed_in_session(&mut fixture.router, PASSWORD).await;
+        let account = send(
+            &mut fixture.router,
+            Method::GET,
+            "/auth/account",
+            &[("cookie", &cookie)],
+            None,
+        )
+        .await;
+        assert_eq!(
+            json_body(account).await["sessions"],
+            json!({"others": 1, "remembered": false})
+        );
+        let ended = send(
+            &mut fixture.router,
+            Method::POST,
+            "/auth/sessions/end-others",
+            &[("cookie", &cookie), ("x-csrf-token", &csrf)],
+            Some(json!({})),
+        )
+        .await;
+        assert_eq!(json_body(ended).await["ended"], 1);
+        assert_eq!(
+            username_for(&mut fixture.router, &other).await,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            username_for(&mut fixture.router, &cookie).await,
+            StatusCode::OK
+        );
+        let mut router = restarted(&fixture).await;
+        assert_eq!(
+            username_for(&mut router, &other).await,
+            StatusCode::UNAUTHORIZED
+        );
+    }
+
+    #[tokio::test]
+    async fn a_password_change_forgets_remembered_sessions() {
+        let mut fixture = fixture(PathBuf::from("/nonexistent"));
+        let other = cookie_from(&login_remembered(&mut fixture.router, true).await);
+        // Changed on the server, as the reset command does.
+        fixture
+            .state
+            .accounts
+            .save(&account::new_account_with_cost("admin", NEW_PASSWORD, 4).unwrap())
+            .unwrap();
+        let mut router = restarted(&fixture).await;
+        assert_eq!(
+            username_for(&mut router, &other).await,
+            StatusCode::UNAUTHORIZED
+        );
+        assert!(!fixture._directory.path().join("sessions.json").exists());
+    }
+
+    #[tokio::test]
+    async fn remembered_sessions_expire_when_unused() {
+        let Fixture {
+            state,
+            _directory: _keep,
+            ..
+        } = fixture(PathBuf::from("/nonexistent"));
+        let generation = state.accounts.load().unwrap().generation();
+        let (token, _) = create_session(&state, generation, true).await;
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::COOKIE,
+            HeaderValue::from_str(&format!("{SESSION_COOKIE}={token}")).unwrap(),
+        );
+        for session in state.sessions.lock().await.values_mut() {
+            // Past the short limits, within the remembered ones.
+            session.created -= SESSION_LIFETIME + 1;
+            session.last_seen -= SESSION_IDLE_TIMEOUT + 1;
+        }
+        assert!(resume_session(&state, &headers).await.is_some());
+        for session in state.sessions.lock().await.values_mut() {
+            session.last_seen -= REMEMBERED_IDLE_TIMEOUT + 1;
+        }
+        assert!(resume_session(&state, &headers).await.is_none());
+    }
+
     #[tokio::test]
     async fn expired_sessions_are_rejected() {
         let Fixture {
@@ -2074,9 +2389,9 @@ mod tests {
             ..
         } = fixture(PathBuf::from("/nonexistent"));
         let generation = state.accounts.load().unwrap().generation();
-        let (token, _) = create_session(&state, generation).await;
+        let (token, _) = create_session(&state, generation, false).await;
         for session in state.sessions.lock().await.values_mut() {
-            session.last_seen -= SESSION_IDLE_TIMEOUT + Duration::from_secs(1);
+            session.last_seen -= SESSION_IDLE_TIMEOUT + 1;
         }
         let mut headers = HeaderMap::new();
         headers.insert(

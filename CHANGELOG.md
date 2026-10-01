@@ -9,11 +9,14 @@ All notable changes to Tailway are listed here. Versions follow [Semantic Versio
 - A DNS answer cache in the forwarder, kept separately for each route; repeated lookups are answered in about a millisecond.
 - `deploy/proxmox/tailway-tune.sh` and its timer, which turn on UDP GRO forwarding along the gateway's path on a Proxmox host.
 - A **Performance** section in the guide, with the recommended host settings.
+- **Keep me signed in on this device** at sign-in: the session lasts until 30 days without a visit (at most 180 days) and survives restarts and upgrades.
+- **Sign out other browsers** on the account page, which also shows how many other browsers are signed in.
 
 ### Changed
 
 - IPv6 from devices is refused immediately (a TCP reset) instead of being dropped silently, so apps fall back to IPv4 without delay. `compose.yaml` now turns on IPv6 forwarding in the agent's container; update your copy.
 - The agent turns on UDP GRO forwarding on its network interface at startup. The agent image now includes `ethtool`.
+- A console session without **Keep me signed in** now ends when the browser closes.
 
 ## [0.1.0-alpha.1] - 2026-09-28
 

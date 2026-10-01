@@ -812,6 +812,11 @@ const renderConsoleAccount = () => {
   }
   if (!state.formsFilled.mail) fillMailForm(account.recovery);
   $("#account-changed").textContent = account.passwordChangedAt ? `Password last changed ${relativeTime(account.passwordChangedAt * 1000)}.` : "";
+  const sessions = account.sessions || { others: 0, remembered: false };
+  const others = sessions.others === 0 ? "No other browser is signed in."
+    : `${sessions.others} other ${sessions.others === 1 ? "browser is" : "browsers are"} signed in.`;
+  $("#account-sessions").textContent = `${sessions.remembered ? "This browser stays signed in for 30 days after your last visit." : "This browser signs out when it closes."} ${others}`;
+  $("#end-other-sessions").disabled = sessions.others === 0;
   $("#account-recovery").textContent = account.recovery
     ? `Forgot your password? The sign-in page can email a reset code to ${account.recovery.email}.`
     : "Without a recovery email, a forgotten password can only be reset on the server.";
@@ -1122,12 +1127,30 @@ $("#console-account-form").addEventListener("submit", async event => {
         newPassword: newPassword.value || null
       }) });
       state.consoleAccount = { ...state.consoleAccount, username: saved.username, passwordChangedAt: saved.passwordChangedAt };
+      if (saved.passwordChanged) state.consoleAccount.sessions = { ...state.consoleAccount.sessions, others: 0 };
       toast(saved.passwordChanged ? "Saved. Other browsers were signed out." : "Saved.");
       renderChrome();
       renderConsoleAccount();
     } catch (error) { toast(error.message, "bad"); }
     for (const input of [newPassword, confirmation, current]) input.value = "";
   });
+});
+$("#end-other-sessions").addEventListener("click", async event => {
+  const confirmed = await confirmDialog({
+    title: "Sign out other browsers?",
+    text: "Every other browser signed in to this console, including ones set to stay signed in, will need the password again.",
+    confirm: "Sign out others",
+    danger: true
+  });
+  if (!confirmed) return;
+  await busy(event.currentTarget, async () => {
+    try {
+      const { ended } = await api("/auth/sessions/end-others", { method: "POST", body: "{}" });
+      state.consoleAccount = { ...state.consoleAccount, sessions: { ...state.consoleAccount.sessions, others: 0 } };
+      toast(ended ? `Signed out ${ended} other ${ended === 1 ? "browser" : "browsers"}.` : "No other browser was signed in.");
+    } catch (error) { toast(error.message, "bad"); }
+  });
+  renderConsoleAccount();
 });
 $("#mail-enabled").addEventListener("change", syncChannels);
 $("#smtp-security").addEventListener("change", event => {

@@ -23,6 +23,7 @@
         <label>Username<input id="signup-username" autocomplete="username" autocapitalize="none" spellcheck="false" required maxlength="64" value="admin"></label>
         <label>Password<input id="signup-password" type="password" autocomplete="new-password" minlength="12" maxlength="72" required></label>
         <label>Repeat password<input id="signup-confirm" type="password" autocomplete="new-password" minlength="12" maxlength="72" required></label>
+        <label class="check"><input type="checkbox" id="signup-remember"><span>Keep me signed in on this device<small>For 30 days after your last visit. Don't use on a shared computer.</small></span></label>
         <button>Create account</button>
         <p class="login-note">Then set up password recovery by email on the Console account page.</p>
       </form>
@@ -31,6 +32,7 @@
         <h1>Sign in</h1>
         <label>Username<input id="login-username" autocomplete="username" autocapitalize="none" spellcheck="false" required maxlength="64" autofocus></label>
         <label>Password<input id="login-password" type="password" autocomplete="current-password" required maxlength="128"></label>
+        <label class="check"><input type="checkbox" id="login-remember"><span>Keep me signed in on this device<small>For 30 days after your last visit. Don't use on a shared computer.</small></span></label>
         <button>Sign in</button>
         <button type="button" class="link-button" id="show-recovery">Forgot password?</button>
       </form>
