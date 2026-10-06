@@ -13,6 +13,7 @@ use std::time::Duration;
 use serde::Serialize;
 
 use crate::alert::Alerts;
+use crate::events::{Category, Event, EventLog, Severity};
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -58,6 +59,9 @@ pub struct Report {
     pub reason: String,
     pub message: String,
     pub alert: Option<Alert>,
+    /// Record each status change in the event history, so even a short
+    /// problem that never reaches an alert leaves a trace.
+    pub record: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -81,6 +85,7 @@ pub struct Check {
 pub struct Health {
     checks: Mutex<BTreeMap<String, Check>>,
     alerts: Option<Arc<Alerts>>,
+    events: Option<Arc<EventLog>>,
 }
 
 impl Health {
@@ -88,7 +93,14 @@ impl Health {
         Self {
             checks: Mutex::new(BTreeMap::new()),
             alerts,
+            events: None,
         }
+    }
+
+    /// Where checks reported with `record` note their status changes.
+    pub fn with_events(mut self, events: Arc<EventLog>) -> Self {
+        self.events = Some(events);
+        self
     }
 
     fn checks_mut(&self) -> std::sync::MutexGuard<'_, BTreeMap<String, Check>> {
@@ -99,8 +111,9 @@ impl Health {
 
     pub fn report(&self, report: Report) {
         let now = crate::sessions::now();
-        {
+        let previous = {
             let mut checks = self.checks_mut();
+            let previous = checks.get(&report.id).map(|check| check.status);
             let check = checks.entry(report.id.clone()).or_insert_with(|| Check {
                 id: report.id.clone(),
                 group: report.group,
@@ -116,14 +129,22 @@ impl Health {
                 check.since = now;
             }
             check.group = report.group;
-            check.name = report.name;
+            check.name = report.name.clone();
             check.status = report.status;
-            check.reason = report.reason;
+            check.reason = report.reason.clone();
             check.message = report.message.clone();
             check.checked = now;
             if report.status == Status::Ok {
                 check.last_ok = Some(now);
             }
+            previous
+        };
+        if report.record
+            && previous != Some(report.status)
+            && let Some(events) = &self.events
+            && let Some(event) = change_event(previous, &report)
+        {
+            events.record(event);
         }
         if let (Some(alerts), Some(alert)) = (&self.alerts, report.alert) {
             let problem = (report.status >= alert.from).then_some(report.message);
@@ -167,6 +188,31 @@ impl Health {
     }
 }
 
+/// The event for a check whose status changed; none for a first report
+/// that is fine, or for "unknown".
+fn change_event(previous: Option<Status>, report: &Report) -> Option<Event> {
+    let (severity, message) = match report.status {
+        Status::Unknown => return None,
+        Status::Ok if previous.is_none() => return None,
+        Status::Ok => (
+            Severity::Info,
+            format!("{}: back to normal ({})", report.name, report.message),
+        ),
+        Status::Warning => (
+            Severity::Warning,
+            format!("{}: {}", report.name, report.message),
+        ),
+        Status::Failed => (
+            Severity::Error,
+            format!("{}: {}", report.name, report.message),
+        ),
+    };
+    Some(
+        Event::new(severity, Category::Health, "check.changed", message)
+            .subject(report.name.clone()),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -180,6 +226,7 @@ mod tests {
             reason: "test".into(),
             message: format!("{id} is {status:?}"),
             alert,
+            record: false,
         }
     }
 
@@ -220,6 +267,35 @@ mod tests {
         assert!(
             alerts.active().is_empty(),
             "removed checks resolve their alerts"
+        );
+    }
+
+    #[test]
+    fn records_status_changes_of_recorded_checks_only() {
+        let directory = tempfile::tempdir().unwrap();
+        let events = Arc::new(EventLog::new(directory.path()));
+        let health = Health::new(None).with_events(events.clone());
+        let recorded = |status| Report {
+            record: true,
+            ..report("tailscale:coordination", status, None)
+        };
+        health.report(recorded(Status::Ok));
+        health.report(recorded(Status::Ok));
+        health.report(recorded(Status::Warning));
+        health.report(recorded(Status::Warning));
+        health.report(recorded(Status::Ok));
+        health.report(report("host:disk", Status::Warning, None));
+        let messages: Vec<String> = events
+            .query(&crate::events::Query::default())
+            .into_iter()
+            .map(|event| event.message)
+            .collect();
+        assert_eq!(
+            messages,
+            [
+                "tailscale:coordination: back to normal (tailscale:coordination is Ok)",
+                "tailscale:coordination: tailscale:coordination is Warning",
+            ]
         );
     }
 }

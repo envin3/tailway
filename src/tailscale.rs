@@ -17,6 +17,17 @@ pub struct Provider {
 struct Status {
     backend_state: String,
     peer: Option<HashMap<String, Peer>>,
+    /// Tailscale's own warnings, e.g. no connection to the coordination server.
+    health: Option<Vec<String>>,
+    #[serde(rename = "Self")]
+    self_node: Option<SelfNode>,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default, rename_all = "PascalCase")]
+struct SelfNode {
+    online: bool,
+    key_expiry: Option<String>,
 }
 
 /// Tailnet peers plus whether the local Tailscale is connected with a device list.
@@ -25,6 +36,20 @@ pub struct Snapshot {
     /// `BackendState == "Running"`: logged in with a network map, so the peer list is
     /// authoritative. Before that (starting, logged out) it may be empty or partial.
     pub running: bool,
+    pub connection: Connection,
+}
+
+/// How the gateway's own Tailscale node stands with the tailnet.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct Connection {
+    /// Tailscale's health warnings; empty when all is well.
+    pub warnings: Vec<String>,
+    /// Whether the coordination server sees the gateway as online. When it
+    /// does not, devices may show the exit node as unavailable.
+    pub online: bool,
+    /// When the gateway's node key expires (Unix seconds); `None` when key
+    /// expiry is disabled for it.
+    pub key_expiry: Option<u64>,
 }
 
 #[derive(Default, Deserialize)]
@@ -89,7 +114,22 @@ fn parse(output: &[u8]) -> Result<Snapshot> {
         });
     }
     devices.sort_by(|left, right| left.node_id.cmp(&right.node_id));
-    Ok(Snapshot { devices, running })
+    let self_node = current.self_node.unwrap_or_default();
+    let connection = Connection {
+        warnings: current.health.unwrap_or_default(),
+        online: self_node.online,
+        key_expiry: self_node
+            .key_expiry
+            .as_deref()
+            .and_then(|expiry| humantime::parse_rfc3339_weak(expiry).ok())
+            .and_then(|expiry| expiry.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|expiry| expiry.as_secs()),
+    };
+    Ok(Snapshot {
+        devices,
+        running,
+        connection,
+    })
 }
 
 fn display_name(peer: &Peer) -> String {
@@ -171,6 +211,27 @@ mod tests {
                 parse(format!(r#"{{"BackendState":"{state}","Peer":null}}"#).as_bytes()).unwrap();
             assert!(!snapshot.running, "{state} treated as running");
         }
+    }
+
+    #[test]
+    fn reads_the_gateways_own_connection() {
+        let snapshot = parse(
+            br#"{"BackendState":"Running","Health":["Unable to connect to the Tailscale coordination server to synchronize the state of your tailnet."],"Self":{"Online":false,"KeyExpiry":"2027-03-05T10:00:00Z"}}"#,
+        )
+        .unwrap();
+        assert!(!snapshot.connection.online);
+        assert_eq!(snapshot.connection.warnings.len(), 1);
+        assert_eq!(snapshot.connection.key_expiry, Some(1_804_240_800));
+        let healthy =
+            parse(br#"{"BackendState":"Running","Health":null,"Self":{"Online":true}}"#).unwrap();
+        assert_eq!(
+            healthy.connection,
+            Connection {
+                warnings: Vec::new(),
+                online: true,
+                key_expiry: None,
+            }
+        );
     }
 
     #[test]

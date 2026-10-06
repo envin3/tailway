@@ -91,6 +91,7 @@ pub fn route_events(
     current: &BTreeMap<Ipv4Addr, String>,
     devices: &[Device],
     exits: &[Exit],
+    previous_exits: &[Exit],
     assignments: &[Assignment],
 ) -> Vec<Event> {
     let owner: HashMap<Ipv4Addr, &Device> = devices
@@ -105,7 +106,12 @@ pub fn route_events(
                 })
         })
         .collect();
-    let exits: HashMap<&str, &Exit> = exits.iter().map(|exit| (exit.id.as_str(), exit)).collect();
+    // Current locations win; removed ones are still known by name.
+    let exits: HashMap<&str, &Exit> = previous_exits
+        .iter()
+        .chain(exits)
+        .map(|exit| (exit.id.as_str(), exit))
+        .collect();
     let assigned: HashMap<&str, &str> = assignments
         .iter()
         .map(|assignment| (assignment.node_id.as_str(), assignment.exit_id.as_str()))
@@ -261,6 +267,7 @@ mod tests {
             &current,
             std::slice::from_ref(&device),
             &exits,
+            &[],
             &assignments,
         );
         assert_eq!(events.len(), 1);
@@ -272,13 +279,40 @@ mod tests {
         assert_eq!(events[0].subject.as_deref(), Some("envin-desktop"));
 
         let direct = BTreeMap::from([(address, "direct".to_owned())]);
-        let events = route_events(&current, &direct, &[device], &exits, &assignments);
+        let events = route_events(
+            &current,
+            &direct,
+            std::slice::from_ref(&device),
+            &exits,
+            &[],
+            &assignments,
+        );
         assert_eq!(
             events[0].message,
             "envin-desktop: blocked → direct Internet"
         );
         assert_eq!(events[0].severity, Severity::Info);
         // Devices joining or leaving the tailnet are not route changes.
-        assert!(route_events(&BTreeMap::new(), &current, &[], &exits, &assignments).is_empty());
+        assert!(
+            route_events(&BTreeMap::new(), &current, &[], &exits, &[], &assignments).is_empty()
+        );
+
+        // Moving off a location that this same change removed: still by name.
+        let removed = Exit {
+            id: "exit-ad".into(),
+            display_name: "AD#1".into(),
+            ..Exit::default()
+        };
+        let before = BTreeMap::from([(address, "exit:exit-ad".to_owned())]);
+        let after = BTreeMap::from([(address, "exit:exit-es".to_owned())]);
+        let events = route_events(
+            &before,
+            &after,
+            &[device],
+            &[exit(ExitStatus::Healthy, "")],
+            &[removed],
+            &[],
+        );
+        assert_eq!(events[0].message, "envin-desktop: AD#1 → ES#146");
     }
 }

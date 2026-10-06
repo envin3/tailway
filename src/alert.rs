@@ -202,6 +202,8 @@ fn title(key: &str) -> String {
     match key.split_once(':') {
         Some(("exit", exit)) => format!("exit {exit}"),
         Some(("exit-node", device)) => format!("{device} stopped using the gateway"),
+        Some(("tailscale", "coordination")) => "gateway's connection to Tailscale".into(),
+        Some(("tailscale", "key")) => "gateway's Tailscale key".into(),
         Some(("host", "disk")) => "gateway disk space".into(),
         Some(("host", "conntrack")) => "gateway connection table".into(),
         Some(("host", check)) => format!("gateway {check}"),

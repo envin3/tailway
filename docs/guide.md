@@ -51,9 +51,11 @@ One failed lookup marks the location *degraded*. Two in a row mark it *failed*: 
 
 ### The health registry
 
-Besides the locations, the gateway checks itself on every reconcile: its routing rules, Tailscale, the DNS forwarder, each VPN-routed device's use of the exit node, the Proton session and certificate, and the host's free disk space (for `state/`), clock synchronisation, and connection-tracking table. The dashboard's **Health checks** card shows them all. `GET /v1/health` returns each check's status (`ok`, `unknown`, `warning`, `failed`), reason code, message, when the status last changed, and when the check was last OK.
+Besides the locations, the gateway checks itself on every reconcile: its routing rules, Tailscale, its connection to Tailscale's coordination server, its Tailscale key's expiry, the DNS forwarder, each VPN-routed device's use of the exit node, the Proton session and certificate, and the host's free disk space (for `state/`), clock synchronisation, and connection-tracking table. The dashboard's **Health checks** card shows them all. `GET /v1/health` returns each check's status (`ok`, `unknown`, `warning`, `failed`), reason code, message, when the status last changed, and when the check was last OK.
 
-Alerts come from these checks: a failed location at once, failed routing after 90 seconds, Tailscale down after 3 minutes, a signed-out Proton session after 10 minutes, low disk space (under 200 MB) after 10 minutes, and a connection table over 80% full after 5 minutes. An unsynchronised clock shows on the dashboard without an alert.
+The gateway's own checks record every change in the activity history, even a short one that never becomes an alert. In particular, **Tailscale connection** turns to a warning when the coordination server doesn't see the gateway as online, or Tailscale reports a problem. Devices, Apple ones especially, can then show the exit node as unavailable even though tunnels keep working.
+
+Alerts come from these checks: a failed location at once, failed routing after 90 seconds, Tailscale down after 3 minutes, the gateway's connection to Tailscale lost for 5 minutes, its Tailscale key within 14 days of expiring, a signed-out Proton session after 10 minutes, low disk space (under 200 MB) after 10 minutes, and a connection table over 80% full after 5 minutes. An unsynchronised clock shows on the dashboard without an alert.
 
 For the container runtime and monitors, the control socket also answers:
 
@@ -212,7 +214,7 @@ The history is stored as JSON lines in `state/events/`, in five files of up to 1
 
 ## Logs
 
-`docker compose logs gateway-agent` shows the agent, the console, and Tailscale. Tailscale's routine messages are hidden unless `TAILSCALE_LOG=verbose`; its warnings and errors always show. `LOG_LEVEL=debug` adds detail, and `LOG_FORMAT=json` writes one JSON object per line for collectors such as Loki or journald. Logs rotate at 10 MB, five files per container, and are lost when a container is replaced.
+`docker compose logs gateway-agent` shows the agent, the console, and Tailscale. Of Tailscale's own messages, its warnings and errors always show, and so do its connection-state messages: the coordination server, relays, which path each device uses, network changes, and its health reports. These explain why a device lost the exit node. Its other routine messages are hidden unless `TAILSCALE_LOG=verbose`. `LOG_LEVEL=debug` adds detail, and `LOG_FORMAT=json` writes one JSON object per line for collectors such as Loki or journald. Logs rotate at 10 MB, five files per container, and are lost when a container is replaced.
 
 Passwords, tokens, private keys, and password hashes are never written to the log: the types that hold them print `<redacted>`, and a test fails if one stops doing so.
 

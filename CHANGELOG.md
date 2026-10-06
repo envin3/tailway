@@ -4,6 +4,20 @@ All notable changes to Tailway are listed here. Versions follow [Semantic Versio
 
 ## [Unreleased]
 
+### Added
+
+- A **Tailscale connection** health check: a warning, and an alert after 5 minutes, when the coordination server doesn't see the gateway as online or Tailscale reports a problem. Devices may then show the exit node as unavailable.
+- A **Tailscale key** health check: a warning, with an alert, 14 days before the gateway's node key expires.
+- The gateway's own health checks record every status change in the activity history, even a short problem that never becomes an alert.
+
+### Changed
+
+- Tailscale's connection-state messages (coordination server, relays, device paths, network changes, health) are logged by default, not only its warnings and errors.
+
+### Fixed
+
+- A device's route change now names a location removed in the same change, instead of showing its internal ID.
+
 ## [0.1.0-alpha.2] - 2026-10-01
 
 Visibility and speed: an activity history, health checks, metrics, on-demand diagnosis, faster DNS and IPv6 fallback, and a console that can remember you.

@@ -25,6 +25,7 @@ fn report(id: &str, name: &str, status: Status, reason: &str, message: String) -
             "host:conntrack" => Alert::on_warning(Duration::from_secs(300)),
             _ => None,
         },
+        record: true,
     }
 }
 

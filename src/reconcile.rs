@@ -21,7 +21,7 @@ use crate::platform::Runner;
 use crate::policy::{self, MARK_MASK};
 use crate::probe;
 use crate::state::Store;
-use crate::tailscale::Provider;
+use crate::tailscale::{self, Provider};
 use crate::usage;
 use crate::wireguard;
 
@@ -87,6 +87,7 @@ struct Published {
     last_error: String,
     applied_revision: Option<u64>,
     tailscale_running: bool,
+    tailscale_connection: Option<tailscale::Connection>,
 }
 
 pub struct Reconciler {
@@ -287,6 +288,11 @@ impl Reconciler {
             .elapsed()
     }
 
+    /// The gateway's own standing with the tailnet, from the last pass.
+    pub fn tailscale_connection(&self) -> Option<tailscale::Connection> {
+        self.published().tailscale_connection.clone()
+    }
+
     /// Whether the DNS forwarder answers devices; `None` when it is off.
     pub fn dns_ready(&self) -> Option<bool> {
         self.dns.as_ref().map(|resolver| resolver.ready())
@@ -341,9 +347,14 @@ impl Reconciler {
         {
             bail!("desired state revision {revision} is older than applied revision {applied}");
         }
-        let (devices, tailscale_running) = match self.devices.snapshot().await {
-            Ok(snapshot) => (snapshot.devices, snapshot.running),
-            Err(_) if self.config.dry_run => (Vec::new(), true),
+        let (devices, tailscale_running, tailscale_connection) = match self.devices.snapshot().await
+        {
+            Ok(snapshot) => (
+                snapshot.devices,
+                snapshot.running,
+                Some(snapshot.connection),
+            ),
+            Err(_) if self.config.dry_run => (Vec::new(), true, None),
             Err(error) => return Err(error),
         };
         desired.exits.sort_by(|left, right| left.id.cmp(&right.id));
@@ -445,11 +456,14 @@ impl Reconciler {
         if let Some(events) = &self.events
             && runtime.applied_revision.is_some()
         {
+            // Locations removed in this pass are named from the previous one.
+            let previous_exits = self.published().exits.clone();
             for event in history::route_events(
                 &runtime.applied_routes,
                 &compiled.routes,
                 &devices,
                 &runtime_exits,
+                &previous_exits,
                 &desired.assignments,
             ) {
                 events.record(event);
@@ -479,6 +493,7 @@ impl Reconciler {
             last_error: String::new(),
             applied_revision: Some(revision),
             tailscale_running,
+            tailscale_connection,
         };
         Ok(())
     }

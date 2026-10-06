@@ -22,8 +22,9 @@ use tailway::notify::{self, Notifier, SettingsStore};
 use tailway::platform::Runner;
 use tailway::proton::AccountLimits;
 use tailway::reconcile::{Config, DnsConfig, Reconciler};
+use tailway::sessions;
 use tailway::state::Store;
-use tailway::tailscale::Provider;
+use tailway::tailscale::{self, Provider};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::net::UnixListener;
 use tokio::process::{Child, Command};
@@ -63,7 +64,7 @@ async fn main() -> Result<()> {
         "/var/lib/tailway/events",
     )));
     let (alerts, notifier) = start_alerts(events.clone())?;
-    let health = Arc::new(Health::new(Some(alerts.clone())));
+    let health = Arc::new(Health::new(Some(alerts.clone())).with_events(events.clone()));
     let metrics = Arc::new(Metrics::new(Some(state_directory.join("metrics.json"))));
     let devices = Arc::new(Provider::new(runner.clone()));
     let reconciler = Arc::new(
@@ -464,6 +465,9 @@ async fn observe_health(
             reason: reason.into(),
             message,
             alert,
+            // The gateway's own checks note every change; locations and
+            // devices have their own events.
+            record: group == "gateway",
         };
     health.report(if reconcile_failed {
         check(
@@ -500,6 +504,28 @@ async fn observe_health(
         },
         Alert::on_failure(TAILSCALE_ALERT_GRACE),
     ));
+    if running && let Some(connection) = reconciler.tailscale_connection() {
+        let (status, reason, message) = coordination(&connection);
+        health.report(check(
+            "tailscale:coordination",
+            "gateway",
+            "Tailscale connection",
+            status,
+            reason,
+            message,
+            Alert::on_warning(COORDINATION_ALERT_GRACE),
+        ));
+        let (status, reason, message) = key_expiry(connection.key_expiry, sessions::now());
+        health.report(check(
+            "tailscale:key",
+            "gateway",
+            "Tailscale key",
+            status,
+            reason,
+            message,
+            Alert::on_warning(Duration::ZERO),
+        ));
+    }
     if let Some(ready) = reconciler.dns_ready() {
         health.report(check(
             "dns",
@@ -601,6 +627,69 @@ async fn observe_health(
     ));
 }
 
+/// The gateway's link to Tailscale's coordination server. Without it, the
+/// tailnet sees the gateway as offline and devices (Apple ones especially) may
+/// show the exit node as unavailable, even while tunnels keep working.
+fn coordination(connection: &tailscale::Connection) -> (Status, &'static str, String) {
+    let mut problems = Vec::new();
+    if !connection.online {
+        problems.push(
+            "the coordination server does not see the gateway as online, so devices may show the exit node as unavailable"
+                .to_owned(),
+        );
+    }
+    problems.extend(connection.warnings.iter().cloned());
+    match (connection.online, problems.is_empty()) {
+        (_, true) => (
+            Status::Ok,
+            "ok",
+            "connected to the coordination server".into(),
+        ),
+        (false, _) => (Status::Warning, "tailscale.offline", problems.join("; ")),
+        (true, false) => (Status::Warning, "tailscale.warning", problems.join("; ")),
+    }
+}
+
+/// The gateway's node key: when it expires, the gateway leaves the tailnet
+/// until someone signs it in again.
+fn key_expiry(expiry: Option<u64>, now: u64) -> (Status, &'static str, String) {
+    let Some(expiry) = expiry else {
+        return (
+            Status::Ok,
+            "ok",
+            "key expiry is disabled for the gateway".into(),
+        );
+    };
+    let date =
+        humantime::format_rfc3339_seconds(std::time::UNIX_EPOCH + Duration::from_secs(expiry))
+            .to_string();
+    let date = &date[..10];
+    let days = expiry.saturating_sub(now) / 86_400;
+    if expiry <= now {
+        (
+            Status::Failed,
+            "tailscale.key_expired",
+            format!(
+                "the gateway's Tailscale key expired on {date}; sign it in again with tailscale up, or disable key expiry for it in the admin console"
+            ),
+        )
+    } else if expiry - now < KEY_EXPIRY_WARNING.as_secs() {
+        (
+            Status::Warning,
+            "tailscale.key_expiring",
+            format!(
+                "the gateway's Tailscale key expires on {date}, in {days} days; disable key expiry for it in the Tailscale admin console, or sign it in again"
+            ),
+        )
+    } else {
+        (
+            Status::Ok,
+            "ok",
+            format!("expires on {date}, in {days} days"),
+        )
+    }
+}
+
 async fn watch_account(account_limits: Arc<AccountLimits>, health: Arc<Health>) {
     loop {
         let (session, certificate) = match account_limits.account().await {
@@ -644,6 +733,7 @@ async fn watch_account(account_limits: Arc<AccountLimits>, health: Arc<Health>) 
             },
             message: problem.unwrap_or_else(|| "OK".into()),
             alert,
+            record: true,
         };
         health.report(report(
             "proton-session",
@@ -681,6 +771,8 @@ fn certificate_problem(valid_seconds: Option<i64>, background_refresh: bool) -> 
 
 const STARTUP_RETRY: Duration = Duration::from_secs(2);
 const LIVENESS_MIN: Duration = Duration::from_secs(150);
+const COORDINATION_ALERT_GRACE: Duration = Duration::from_secs(300);
+const KEY_EXPIRY_WARNING: Duration = Duration::from_secs(14 * 86_400);
 const STARTUP_FAST_RETRY_WINDOW: Duration = Duration::from_secs(120);
 
 fn dns_config() -> Result<Option<DnsConfig>> {
@@ -717,4 +809,46 @@ fn environment(name: &str, fallback: &str) -> String {
         .ok()
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| fallback.into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reports_the_gateways_link_to_tailscale() {
+        let connected = tailscale::Connection {
+            warnings: Vec::new(),
+            online: true,
+            key_expiry: None,
+        };
+        assert_eq!(coordination(&connected).0, Status::Ok);
+        let offline = tailscale::Connection {
+            online: false,
+            ..connected.clone()
+        };
+        let (status, reason, message) = coordination(&offline);
+        assert_eq!((status, reason), (Status::Warning, "tailscale.offline"));
+        assert!(message.contains("exit node as unavailable"));
+        let warned = tailscale::Connection {
+            warnings: vec!["Tailscale could not connect to the 'Frankfurt' relay server.".into()],
+            ..connected
+        };
+        assert_eq!(coordination(&warned).1, "tailscale.warning");
+    }
+
+    #[test]
+    fn warns_before_the_gateways_key_expires() {
+        let now = 1_790_000_000;
+        let day = 86_400;
+        assert_eq!(key_expiry(None, now).0, Status::Ok);
+        assert_eq!(key_expiry(Some(now + 60 * day), now).0, Status::Ok);
+        let (status, reason, message) = key_expiry(Some(now + 10 * day), now);
+        assert_eq!(
+            (status, reason),
+            (Status::Warning, "tailscale.key_expiring")
+        );
+        assert!(message.contains("in 10 days"), "{message}");
+        assert_eq!(key_expiry(Some(now - day), now).0, Status::Failed);
+    }
 }
