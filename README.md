@@ -8,7 +8,7 @@ Tailway turns one machine on your [Tailscale](https://tailscale.com) network int
 - **A web console** with a dashboard, per-device settings, health checks, alerts (Telegram or webhook), and password recovery by email.
 
 > [!WARNING]
-> **Tailway is alpha software** (version `0.1.0-alpha.2`). It works, but it has had little testing outside its first installation. Expect bugs, and expect settings, stored data, and behaviour to change between releases without an upgrade path. Read the [changelog](CHANGELOG.md) before upgrading, and don't rely on it yet where a routing mistake would be costly. It routes IPv4 only and runs on Linux with Docker.
+> **Tailway is alpha software** (version `0.1.0-alpha.3`). It works, but it has had little testing outside its first installation. Expect bugs, and expect settings, stored data, and behaviour to change between releases without an upgrade path. Read the [changelog](CHANGELOG.md) before upgrading, and don't rely on it yet where a routing mistake would be costly. It routes IPv4 only and runs on Linux with Docker.
 
 ## Requirements
 

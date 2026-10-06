@@ -4,6 +4,12 @@ All notable changes to Tailway are listed here. Versions follow [Semantic Versio
 
 ## [Unreleased]
 
+## [0.1.0-alpha.3] - 2026-10-06
+
+Seeing why a device loses the exit node: the gateway now watches its own connection to Tailscale, records every change in its own health, and keeps Tailscale's connection log.
+
+**Upgrading:** no changes to `compose.yaml` or settings; rebuild with `docker compose up -d --build`.
+
 ### Added
 
 - A **Tailscale connection** health check: a warning, and an alert after 5 minutes, when the coordination server doesn't see the gateway as online or Tailscale reports a problem. Devices may then show the exit node as unavailable.
@@ -69,6 +75,7 @@ First alpha release.
 - A console account with sign-up on first run, password changes, and password recovery by email or on the server.
 - `--version` on both binaries and `version` in `GET /v1/status`.
 
-[Unreleased]: https://github.com/envin3/tailway/compare/v0.1.0-alpha.2...HEAD
+[Unreleased]: https://github.com/envin3/tailway/compare/v0.1.0-alpha.3...HEAD
+[0.1.0-alpha.3]: https://github.com/envin3/tailway/releases/tag/v0.1.0-alpha.3
 [0.1.0-alpha.2]: https://github.com/envin3/tailway/releases/tag/v0.1.0-alpha.2
 [0.1.0-alpha.1]: https://github.com/envin3/tailway/releases/tag/v0.1.0-alpha.1
