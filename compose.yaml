@@ -104,6 +104,7 @@ services:
       dockerfile: Dockerfile.broker
       args:
         PROTON_CORE_VERSION: ${PROTON_CORE_VERSION:-5.6.20}
+        PROTON_PYTHON_CORE_VERSION: ${PROTON_PYTHON_CORE_VERSION:-0.7.4}
     image: local/tailway-broker:${IMAGE_TAG:-dev}
     pull_policy: never
     container_name: tailway-broker

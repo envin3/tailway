@@ -2,7 +2,10 @@ FROM debian:13-slim
 
 ARG PROTON_RELEASE_URL=https://repo.protonvpn.com/debian/dists/stable/main/binary-all/protonvpn-stable-release_1.0.8_all.deb
 ARG PROTON_RELEASE_SHA256=0b14e71586b22e498eb20926c48c7b434b751149b1f2af9902ef1cfe6b03e180
+# Exact versions: Proton's repository serves newer ones, which the broker
+# has not been tested with.
 ARG PROTON_CORE_VERSION=5.6.20
+ARG PROTON_PYTHON_CORE_VERSION=0.7.4
 
 RUN apt-get update \
     && apt-get install --no-install-recommends -y ca-certificates gnupg python3 wget \
@@ -10,7 +13,9 @@ RUN apt-get update \
     && echo "$PROTON_RELEASE_SHA256  /tmp/proton-release.deb" | sha256sum --check - \
     && dpkg -i /tmp/proton-release.deb \
     && apt-get update \
-    && apt-get install --no-install-recommends -y python3-proton-vpn-api-core \
+    && apt-get install --no-install-recommends -y \
+        "python3-proton-vpn-api-core=$PROTON_CORE_VERSION" \
+        "python3-proton-core=$PROTON_PYTHON_CORE_VERSION" \
     && python3 -c "import importlib.metadata as m; actual=m.version('proton-vpn-api-core'); expected='$PROTON_CORE_VERSION'; assert actual == expected, f'expected proton-vpn-api-core {expected}, got {actual}'" \
     && rm -rf /var/lib/apt/lists/* /tmp/proton-release.deb
 

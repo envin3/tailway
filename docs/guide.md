@@ -108,7 +108,7 @@ Proton support is unofficial; see the README. Sign in under **Settings → Proto
 - **Keys:** each Proton location gets its own WireGuard key, because Proton lets a key be active on only one server at a time. Several tunnels sharing a key keep taking the session from each other, and each drops traffic for seconds at a time.
 - **Certificates:** Proton authorises each key with a certificate valid for about a week. With an expired certificate, Proton servers still complete handshakes but forward nothing. The broker renews each certificate when Proton's refresh time passes, and checks every profile against its key at startup and every five minutes, rewriting any that don't match. A new sign-in renews every certificate and keeps the keys.
 - **Connection limit:** Proton's connection limit counts Proton tunnels only. At the limit, a new Proton location is refused, but devices can still share or switch existing ones.
-- **Library version:** the broker pins Proton's `proton-vpn-api-core`. Proton's package repository keeps only its latest release, so when a build fails on the version check, raise `PROTON_CORE_VERSION` to the version the repository serves.
+- **Library version:** the broker installs exact versions of Proton's `proton-vpn-api-core` (`PROTON_CORE_VERSION`) and `proton-core` (`PROTON_PYTHON_CORE_VERSION`), the ones it was tested with. Proton's package repository keeps older releases, so builds stay reproducible when Proton publishes new ones. To try a newer release, raise both and test signing in, server browsing, and certificate renewal.
 
 ## Console account
 

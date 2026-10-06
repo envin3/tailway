@@ -4,6 +4,10 @@ All notable changes to Tailway are listed here. Versions follow [Semantic Versio
 
 ## [Unreleased]
 
+### Fixed
+
+- The broker image builds again. It now installs the exact Proton library versions it was tested with (`proton-vpn-api-core` 5.6.20 and `proton-core` 0.7.4) instead of the newest, after Proton published 5.8.7.
+
 ## [0.1.0-alpha.3] - 2026-10-06
 
 Seeing why a device loses the exit node: the gateway now watches its own connection to Tailscale, records every change in its own health, and keeps Tailscale's connection log.
