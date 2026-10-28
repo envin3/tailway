@@ -19,7 +19,7 @@ use http_body_util::{BodyExt, Full, Limited};
 use hyper::Request as HyperRequest;
 use hyper::client::conn::http1;
 use hyper_util::rt::TokioIo;
-use rand::{Rng, RngCore};
+use rand::{Rng, RngExt};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};

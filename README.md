@@ -90,6 +90,10 @@ Importing Proton's downloadable WireGuard configurations, like any other provide
 
 ## Versions
 
+When upgrading, update `TAILSCALE_VERSION` and `PROTON_CORE_VERSION` in `.env`
+to match `.env.example` before rebuilding. Values in `.env` override Compose
+defaults.
+
 Tailway follows [Semantic Versioning](https://semver.org); alpha releases are `0.x.y-alpha.N`. [CHANGELOG.md](CHANGELOG.md) lists what each release changes, and [docs/releasing.md](docs/releasing.md) how releases are made. The running version is shown in the console's sidebar and in `GET /v1/status`, or run `docker compose exec gateway-agent gateway-agent --version`.
 
 ## Development

@@ -1,6 +1,6 @@
 [package]
 name = "tailway"
-version = "0.1.0-alpha.3"
+version = "0.1.0-alpha.4"
 edition = "2024"
 rust-version = "1.85"
 description = "Per-device VPN routing for a Tailscale exit node"
@@ -10,35 +10,37 @@ repository = "https://github.com/envin3/tailway"
 [dependencies]
 anyhow = "1.0"
 axum = "0.8"
-axum-server = { version = "0.7", features = ["tls-rustls"] }
-base64 = "0.22"
-bcrypt = "0.17"
-bytes = "1.10"
+axum-server = { version = "0.8", features = ["tls-rustls"] }
+base64 = "0.23"
+bcrypt = "0.19"
+bytes = "1.12"
 hex = "0.4"
 http-body-util = "0.1"
-humantime = "2.3"
+humantime = "2.4"
 lettre = { version = "0.11", default-features = false, features = ["aws-lc-rs", "builder", "hostname", "smtp-transport", "tokio1-rustls", "webpki-roots"] }
-hyper = { version = "1.6", features = ["client", "http1"] }
+hyper = { version = "1.12", features = ["client", "http1"] }
 hyper-util = { version = "0.1", features = ["client-legacy", "http1", "tokio"] }
 libc = "0.2"
-rand = "0.9"
+rand = "0.10"
 # No bundled crypto: axum-server already brings rustls with aws-lc-rs, and two
 # providers in one process leave rustls unable to choose a default.
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-webpki-roots-no-provider"] }
+# Reqwest 0.13 uses the platform CA store (ca-certificates in Docker).
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls-no-provider"] }
 rustls = "0.23"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+# sha2 0.11 requires Rust 1.88; keep the Rust 1.85 minimum supported toolchain.
 sha2 = "0.10"
 socket2 = { version = "0.6", features = ["all"] }
 subtle = "2.6"
-tempfile = "3.20"
-tokio = { version = "1.45", features = ["fs", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
+tempfile = "3.27"
+tokio = { version = "1.54", features = ["fs", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
 tower-service = "0.3"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
 [dev-dependencies]
-tokio = { version = "1.45", features = ["test-util"] }
+tokio = { version = "1.54", features = ["test-util"] }
 
 [profile.release]
 lto = true

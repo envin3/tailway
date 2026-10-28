@@ -4,9 +4,24 @@ All notable changes to Tailway are listed here. Versions follow [Semantic Versio
 
 ## [Unreleased]
 
+## [0.1.0-alpha.4] - 2026-10-28
+
+Dependency updates for the gateway and Proton broker.
+
+**Upgrading:** update `TAILSCALE_VERSION=1.104.4` and `PROTON_CORE_VERSION=5.8.11` in `.env` before rebuilding; keep `PROTON_PYTHON_CORE_VERSION=0.7.4`. Values in `.env` override Compose defaults.
+
+### Changed
+
+- Updated Rust dependencies, including axum-server 0.8, bcrypt 0.19, rand 0.10, reqwest 0.13, and Tokio 1.54. The minimum supported Rust version remains 1.85; sha2 stays on 0.10.
+- HTTPS notifications use the platform CA store through reqwest 0.13, while sharing the existing AWS-LC TLS provider with the console and SMTP client.
+- Tailscale 1.104.4, with updated checksums for amd64 and arm64.
+- Proton VPN API core 5.8.11 and the Proton repository package 1.0.10, with an updated checksum. Proton core remains pinned to 0.7.4.
+- Rust container build image 1.99.1 and Debian 12.15 for the gateway runtime.
+
 ### Fixed
 
-- The broker image builds again. It now installs the exact Proton library versions it was tested with (`proton-vpn-api-core` 5.6.20 and `proton-core` 0.7.4) instead of the newest, after Proton published 5.8.7.
+- The broker installs exact Proton library versions so new upstream releases do not silently change its dependencies.
+- The legacy console password test now uses a fixed htpasswd hash to check compatibility across bcrypt upgrades.
 
 ## [0.1.0-alpha.3] - 2026-10-06
 
@@ -79,7 +94,8 @@ First alpha release.
 - A console account with sign-up on first run, password changes, and password recovery by email or on the server.
 - `--version` on both binaries and `version` in `GET /v1/status`.
 
-[Unreleased]: https://github.com/envin3/tailway/compare/v0.1.0-alpha.3...HEAD
+[Unreleased]: https://github.com/envin3/tailway/compare/v0.1.0-alpha.4...HEAD
+[0.1.0-alpha.4]: https://github.com/envin3/tailway/releases/tag/v0.1.0-alpha.4
 [0.1.0-alpha.3]: https://github.com/envin3/tailway/releases/tag/v0.1.0-alpha.3
 [0.1.0-alpha.2]: https://github.com/envin3/tailway/releases/tag/v0.1.0-alpha.2
 [0.1.0-alpha.1]: https://github.com/envin3/tailway/releases/tag/v0.1.0-alpha.1

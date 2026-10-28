@@ -7,7 +7,7 @@ use axum::middleware::{Next, from_fn_with_state};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
-use rand::RngCore;
+use rand::Rng;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
